@@ -657,7 +657,7 @@ func sortedTodos(agentTodos map[string]*Todo) []*Todo {
 
 func sortTodos(list []*Todo) {
 	priorityOrder := map[string]int{"critical": 0, "high": 1, "normal": 2, "low": 3}
-	statusOrder := map[string]int{"done": 0, "in_progress": 1, "pending": 2}
+	statusOrder := map[string]int{"in_progress": 0, "pending": 1, "done": 2}
 	sort.Slice(list, func(i, j int) bool {
 		left := list[i]
 		right := list[j]

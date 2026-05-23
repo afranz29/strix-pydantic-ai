@@ -18,17 +18,20 @@ import (
 type tickMsg time.Time
 
 type model struct {
-	target      string
-	scanMode    string
-	logHandler  *StrixLogHandler
-	startTime   time.Time
-	elapsed     time.Duration
-	activeTab   int // 0: Logs, 1: Findings, 2: Todo Checklist
-	focusLeft   bool
-	width       int
-	height      int
-	scanRunning bool
-	runFinished bool
+	target             string
+	scanMode           string
+	logHandler         *StrixLogHandler
+	startTime          time.Time
+	elapsed            time.Duration
+	activeTab          int // 0: Logs, 1: Findings, 2: Todo Checklist
+	focusLeft          bool
+	width              int
+	height             int
+	scanRunning        bool
+	runFinished        bool
+	leftScrollOffset   int
+	rightScrollOffsets [3]int
+	tailLogs           bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -57,6 +60,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focusLeft = true
 			} else {
 				m.activeTab = (m.activeTab + 2) % 3
+			}
+		case "up", "k":
+			if m.focusLeft {
+				if m.leftScrollOffset > 0 {
+					m.leftScrollOffset--
+				}
+			} else {
+				if m.activeTab == 0 {
+					m.tailLogs = false
+				}
+				if m.rightScrollOffsets[m.activeTab] > 0 {
+					m.rightScrollOffsets[m.activeTab]--
+				}
+			}
+		case "down", "j":
+			if m.focusLeft {
+				m.leftScrollOffset++
+			} else {
+				m.rightScrollOffsets[m.activeTab]++
+			}
+		case "t":
+			if m.activeTab == 0 {
+				m.tailLogs = true
 			}
 		case "1":
 			m.activeTab = 0
@@ -162,11 +188,11 @@ func (m model) View() string {
 	tabRow := lipgloss.NewStyle().Width(m.width).MaxHeight(1).Render(lipgloss.JoinHorizontal(lipgloss.Top, tabViews...))
 
 	// Left panel: Agents Hierarchy tree
+	var treeView string
 	agents_graph.GraphLock.RLock()
 	rootID := agents_graph.RootAgentID
 	agents_graph.GraphLock.RUnlock()
 
-	var treeView string
 	if rootID != "" {
 		treeView = buildTreeString(rootID, "", true)
 	} else {
@@ -174,18 +200,29 @@ func (m model) View() string {
 	}
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22c55e"))
-	
-	// Truncate/slice tree view to fit left box
+
+	// Truncate/slice tree view to fit left box with scrolling
 	treeLines := strings.Split(treeView, "\n")
-	// Inner height = availableHeight - 2 (borders) - 2 (title + newline)
 	treeLimit := availableHeight - 4
 	if treeLimit < 1 {
 		treeLimit = 1
 	}
-	if len(treeLines) > treeLimit {
-		treeLines = treeLines[:treeLimit]
+
+	if m.leftScrollOffset > len(treeLines)-1 {
+		m.leftScrollOffset = len(treeLines) - 1
 	}
-	treeView = strings.Join(treeLines, "\n")
+	if m.leftScrollOffset < 0 {
+		m.leftScrollOffset = 0
+	}
+
+	visibleTreeLines := treeLines
+	if len(treeLines) > m.leftScrollOffset {
+		visibleTreeLines = treeLines[m.leftScrollOffset:]
+	}
+	if len(visibleTreeLines) > treeLimit {
+		visibleTreeLines = visibleTreeLines[:treeLimit]
+	}
+	treeView = strings.Join(visibleTreeLines, "\n")
 
 	leftContent := fmt.Sprintf("%s\n%s", titleStyle.Render("── Agents Graph ──"), treeView)
 	leftBox := leftBoxStyle.Render(leftContent)
@@ -200,18 +237,42 @@ func (m model) View() string {
 	switch m.activeTab {
 	case 0:
 		logs := m.logHandler.GetTuiLogs()
-		
-		// Wrap logs and collect last lines
+
 		var wrappedLines []string
+		// Optimization: only wrap logs that could possibly be visible
+		// This is still a bit naive but better than wrapping 500 lines every 150ms
+		// If tailing, we only need the last rightContentHeight lines.
+		// If scrolling, we need lines around the offset.
+
 		for _, log := range logs {
 			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(log)
 			wrappedLines = append(wrappedLines, strings.Split(wrapped, "\n")...)
 		}
-		
-		if len(wrappedLines) > rightContentHeight {
-			wrappedLines = wrappedLines[len(wrappedLines)-rightContentHeight:]
+
+		if m.tailLogs {
+			if len(wrappedLines) > rightContentHeight {
+				m.rightScrollOffsets[0] = len(wrappedLines) - rightContentHeight
+			} else {
+				m.rightScrollOffsets[0] = 0
+			}
 		}
-		rightView = strings.Join(wrappedLines, "\n")
+
+		if m.rightScrollOffsets[0] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
+			m.rightScrollOffsets[0] = len(wrappedLines) - 1
+		}
+		if m.rightScrollOffsets[0] < 0 {
+			m.rightScrollOffsets[0] = 0
+		}
+
+		visibleLogs := wrappedLines
+		if len(wrappedLines) > m.rightScrollOffsets[0] {
+			visibleLogs = wrappedLines[m.rightScrollOffsets[0]:]
+		}
+		if len(visibleLogs) > rightContentHeight {
+			visibleLogs = visibleLogs[:rightContentHeight]
+		}
+		rightView = strings.Join(visibleLogs, "\n")
+
 	case 1:
 		noteList := notes.GetNotesList()
 		if len(noteList) == 0 {
@@ -230,14 +291,25 @@ func (m model) View() string {
 				}
 				sb.WriteString("\n")
 			}
-			
-			// Wrap and truncate (show first N lines for notes)
+
 			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
 			wrappedLines := strings.Split(wrapped, "\n")
-			if len(wrappedLines) > rightContentHeight {
-				wrappedLines = wrappedLines[:rightContentHeight]
+
+			if m.rightScrollOffsets[1] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
+				m.rightScrollOffsets[1] = len(wrappedLines) - 1
 			}
-			rightView = strings.Join(wrappedLines, "\n")
+			if m.rightScrollOffsets[1] < 0 {
+				m.rightScrollOffsets[1] = 0
+			}
+
+			visibleLines := wrappedLines
+			if len(wrappedLines) > m.rightScrollOffsets[1] {
+				visibleLines = wrappedLines[m.rightScrollOffsets[1]:]
+			}
+			if len(visibleLines) > rightContentHeight {
+				visibleLines = visibleLines[:rightContentHeight]
+			}
+			rightView = strings.Join(visibleLines, "\n")
 		}
 	case 2:
 		todoList := todo.GetTodoList()
@@ -258,18 +330,32 @@ func (m model) View() string {
 					sb.WriteString(fmt.Sprintf("    %s\n", t.Description))
 				}
 			}
-			
-			// Wrap and truncate (show first N lines for todos)
+
 			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
 			wrappedLines := strings.Split(wrapped, "\n")
-			if len(wrappedLines) > rightContentHeight {
-				wrappedLines = wrappedLines[:rightContentHeight]
+
+			if m.rightScrollOffsets[2] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
+				m.rightScrollOffsets[2] = len(wrappedLines) - 1
 			}
-			rightView = strings.Join(wrappedLines, "\n")
+			if m.rightScrollOffsets[2] < 0 {
+				m.rightScrollOffsets[2] = 0
+			}
+
+			visibleLines := wrappedLines
+			if len(wrappedLines) > m.rightScrollOffsets[2] {
+				visibleLines = wrappedLines[m.rightScrollOffsets[2]:]
+			}
+			if len(visibleLines) > rightContentHeight {
+				visibleLines = visibleLines[:rightContentHeight]
+			}
+			rightView = strings.Join(visibleLines, "\n")
 		}
 	}
 
 	rightTitleText := fmt.Sprintf("── %s ──", tabs[m.activeTab])
+	if m.activeTab == 0 && m.tailLogs {
+		rightTitleText += " (Tailing)"
+	}
 	rightContent := fmt.Sprintf("%s\n%s", titleStyle.Render(rightTitleText), rightView)
 	rightBox := rightBoxStyle.Render(rightContent)
 
@@ -280,7 +366,7 @@ func (m model) View() string {
 		Foreground(lipgloss.Color("#737373")).
 		Width(m.width).
 		MaxHeight(1)
-	footerText := " Tab: Toggle focus | Arrow Keys: Switch panel/tabs | 1, 2, 3: Tabs | Q: Quit scan"
+	footerText := " Tab: Toggle focus | Arrows/JK: Scroll/Tabs | 1,2,3: Tabs | T: Tail Logs | Q: Quit"
 	footer := footerStyle.Render(truncateString(footerText, m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabRow, mainLayout, footer)
@@ -296,10 +382,17 @@ func formatDuration(d time.Duration) string {
 }
 
 func buildTreeString(id string, indent string, isLast bool) string {
+	// Root call takes the lock once and passes it down via a helper or we just rely on recursion
+	// but the current implementation takes/releases lock for every node.
+	// Let's wrap it.
 	agents_graph.GraphLock.RLock()
+	defer agents_graph.GraphLock.RUnlock()
+	return buildTreeStringRecursive(id, indent, isLast, 0)
+}
+
+func buildTreeStringRecursive(id string, indent string, isLast bool, depth int) string {
 	node, exists := agents_graph.AgentNodes[id]
 	if !exists {
-		agents_graph.GraphLock.RUnlock()
 		return ""
 	}
 
@@ -316,7 +409,7 @@ func buildTreeString(id string, indent string, isLast bool) string {
 	}
 
 	var prefix string
-	if indent != "" {
+	if depth > 0 {
 		if isLast {
 			prefix = "└── "
 		} else {
@@ -333,10 +426,11 @@ func buildTreeString(id string, indent string, isLast bool) string {
 			children = append(children, edge.To)
 		}
 	}
-	agents_graph.GraphLock.RUnlock()
 
 	var nextIndent string
-	if indent != "" {
+	if depth == 0 {
+		nextIndent = ""
+	} else {
 		if isLast {
 			nextIndent = indent + "    "
 		} else {
@@ -346,7 +440,7 @@ func buildTreeString(id string, indent string, isLast bool) string {
 
 	for i, childID := range children {
 		lastChild := i == len(children)-1
-		nodeLine += buildTreeString(childID, nextIndent, lastChild)
+		nodeLine += buildTreeStringRecursive(childID, nextIndent, lastChild, depth+1)
 	}
 	return nodeLine
 }
@@ -370,6 +464,7 @@ func RunTUI(ctx context.Context, target, scanMode, runDir string, handler *Strix
 		startTime:   time.Now(),
 		scanRunning: true,
 		focusLeft:   true,
+		tailLogs:    true,
 	}
 
 	// Trigger scanning function asynchronously

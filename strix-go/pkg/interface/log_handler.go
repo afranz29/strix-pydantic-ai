@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -19,7 +20,7 @@ type StrixLogHandler struct {
 	systemFile     *os.File
 	agentFile      *os.File
 	isAgentHandler bool
-	
+
 	// TUI buffer
 	tuiLogs    []string
 	maxTuiLogs int
@@ -90,7 +91,7 @@ func (h *StrixLogHandler) Handle(ctx context.Context, r slog.Record) error {
 			!strings.Contains(msgLower, "notes database") &&
 			!strings.Contains(msgLower, "tool schemas") &&
 			!strings.Contains(msgLower, "gemini client") {
-			
+
 			h.appendToTuiBuffer(r)
 		}
 	}
@@ -113,13 +114,26 @@ func (h *StrixLogHandler) appendToTuiBuffer(r slog.Record) {
 	}
 
 	msg := fmt.Sprintf("[%s] %s: %s", timeStr, levelStr, r.Message)
+	omittedAttrs := 0
 	r.Attrs(func(a slog.Attr) bool {
-		// Clean up the TUI log message by omitting agent/parent ID noise in the printed line
-		if a.Key != "agent_id" && a.Key != "child_id" && a.Key != "parent_id" {
-			msg += fmt.Sprintf(" %s=%v", a.Key, a.Value.Any())
+		// Clean up the TUI log message by omitting agent/parent ID noise in the printed line.
+		if a.Key == "agent_id" || a.Key == "child_id" || a.Key == "parent_id" {
+			return true
+		}
+		if slices.Contains([]string{"completion", "kwargs", "result"}, a.Key) {
+			omittedAttrs++
+			return true
+		}
+
+		value := sanitizeTuiAttrValue(a.Value.Any())
+		if value != "" {
+			msg += fmt.Sprintf(" %s=%s", a.Key, value)
 		}
 		return true
 	})
+	if omittedAttrs > 0 {
+		msg += fmt.Sprintf(" details_omitted=%d", omittedAttrs)
+	}
 
 	h.tuiLogs = append(h.tuiLogs, msg)
 	if len(h.tuiLogs) > h.maxTuiLogs {
@@ -127,10 +141,24 @@ func (h *StrixLogHandler) appendToTuiBuffer(r slog.Record) {
 	}
 }
 
+func sanitizeTuiAttrValue(v interface{}) string {
+	s := fmt.Sprint(v)
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	const maxLen = 160
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
+}
+
 func (h *StrixLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	
+
 	isAgent := h.isAgentHandler
 	if !isAgent {
 		for _, a := range attrs {
@@ -155,7 +183,7 @@ func (h *StrixLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *StrixLogHandler) WithGroup(name string) slog.Handler {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	
+
 	return &StrixLogHandler{
 		systemLog:      h.systemLog.WithGroup(name),
 		agentLog:       h.agentLog.WithGroup(name),
