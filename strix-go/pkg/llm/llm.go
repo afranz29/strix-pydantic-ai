@@ -68,6 +68,66 @@ func NewLLMClient(ctx context.Context) (*LLMClient, error) {
 		}, nil
 	}
 
+	// Determine if it is an Azure model
+	isAzure := strings.HasPrefix(model, "azure/")
+
+	if isAzure {
+		apiKey := os.Getenv("AZURE_OPENAI_API_KEY")
+		if apiKey == "" {
+			apiKey = os.Getenv("AZURE_API_KEY")
+		}
+
+		apiBase := os.Getenv("AZURE_OPENAI_ENDPOINT")
+		if apiBase == "" {
+			apiBase = os.Getenv("AZURE_API_BASE")
+		}
+
+		apiVersion := os.Getenv("AZURE_OPENAI_API_VERSION")
+		if apiVersion == "" {
+			apiVersion = os.Getenv("AZURE_API_VERSION")
+		}
+		if apiVersion == "" {
+			apiVersion = "2024-02-01" // Default stable version
+		}
+
+		// Extract deployment name by removing azure/ prefix
+		deploymentName := strings.TrimPrefix(model, "azure/")
+		if deploymentName == "" {
+			return nil, fmt.Errorf("invalid Azure model format: deployment name cannot be empty after 'azure/' prefix")
+		}
+
+		if apiKey == "" {
+			return nil, fmt.Errorf("AZURE_OPENAI_API_KEY or AZURE_API_KEY is required for Azure models")
+		}
+		if apiBase == "" {
+			return nil, fmt.Errorf("AZURE_OPENAI_ENDPOINT or AZURE_API_BASE is required for Azure models")
+		}
+
+		slog.Info("Initializing Azure OpenAI client",
+			slog.String("deployment", deploymentName),
+			slog.String("api_base", apiBase),
+			slog.String("api_version", apiVersion),
+		)
+
+		opts := []openai.Option{
+			openai.WithAPIType(openai.APITypeAzure),
+			openai.WithToken(apiKey),
+			openai.WithBaseURL(apiBase),
+			openai.WithModel(deploymentName),
+			openai.WithAPIVersion(apiVersion),
+		}
+
+		cli, err := openai.New(opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Azure OpenAI client: %w", err)
+		}
+
+		return &LLMClient{
+			llm:       cli,
+			modelName: deploymentName,
+		}, nil
+	}
+
 	// Determine if it is a Gemini/Google model
 	isGemini := strings.Contains(strings.ToLower(model), "gemini") ||
 		strings.HasPrefix(model, "googleai/") ||
