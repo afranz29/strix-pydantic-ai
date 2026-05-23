@@ -23,19 +23,26 @@ func init() {
 
 func resolveStrixDir() string {
 	cwd, _ := os.Getwd()
-	path := filepath.Join(cwd, "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
+	candidates := []string{
+		filepath.Join(cwd, "strix-python"),
+		filepath.Join(cwd, "strix"),
+		filepath.Join(cwd, "..", "strix-python"),
+		filepath.Join(cwd, "..", "strix"),
+		filepath.Join(cwd, "..", "..", "strix-python"),
+		filepath.Join(cwd, "..", "..", "strix"),
+		filepath.Join(cwd, "..", "..", "..", "strix-python"),
+		filepath.Join(cwd, "..", "..", "..", "strix"),
 	}
-	path = filepath.Join(cwd, "..", "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
+
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			toolsPath := filepath.Join(path, "tools")
+			if tInfo, err := os.Stat(toolsPath); err == nil && tInfo.IsDir() {
+				return path
+			}
+		}
 	}
-	path = filepath.Join(cwd, "..", "..", "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	return "strix"
+	return "strix-python"
 }
 
 // FindSkillFile walks the skills directory to find a matching skill markdown file

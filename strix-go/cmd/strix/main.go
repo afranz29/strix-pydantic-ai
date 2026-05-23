@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/usestrix/strix-go/pkg/agents"
+	"github.com/usestrix/strix-go/pkg/llm"
 	_interface "github.com/usestrix/strix-go/pkg/interface"
 	"github.com/usestrix/strix-go/pkg/runtime"
 	"github.com/usestrix/strix-go/pkg/tools"
@@ -36,6 +37,7 @@ var (
 	scopeMode       string
 	diffBase        string
 	configPath      string
+	review          bool
 )
 
 func main() {
@@ -48,13 +50,14 @@ This Go command line orchestrates Docker sandbox environments and controls the m
 	}
 
 	rootCmd.Flags().StringSliceVarP(&targets, "target", "t", nil, "Target to test (URL, repository, local directory path, domain name, or IP address)")
-	rootCmd.Flags().StringVar(&instruction, "instruction", "", "Custom instructions for the penetration test")
+	rootCmd.Flags().StringVarP(&instruction, "instruction", "i", "", "Custom instructions for the penetration test")
 	rootCmd.Flags().StringVar(&instructionFile, "instruction-file", "", "Path to a file containing detailed custom instructions")
 	rootCmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "n", false, "Run in non-interactive mode (no TUI, exits on completion)")
 	rootCmd.Flags().StringVarP(&scanMode, "scan-mode", "m", "deep", "Scan mode: 'quick' for CI/CD, 'standard' for routine, or 'deep'")
 	rootCmd.Flags().StringVar(&scopeMode, "scope-mode", "auto", "Scope mode: 'auto', 'diff', or 'full'")
 	rootCmd.Flags().StringVar(&diffBase, "diff-base", "", "Target branch or commit to compare against")
 	rootCmd.Flags().StringVar(&configPath, "config", "", "Path to custom config file (JSON)")
+	rootCmd.Flags().BoolVarP(&review, "review", "r", false, "Enable step-by-step interactive review of agent spawning and completion")
 
 	_ = rootCmd.MarkFlagRequired("target")
 
@@ -65,19 +68,24 @@ This Go command line orchestrates Docker sandbox environments and controls the m
 
 func resolveStrixDir() string {
 	cwd, _ := os.Getwd()
-	path := filepath.Join(cwd, "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
+	candidates := []string{
+		filepath.Join(cwd, "strix-python"),
+		filepath.Join(cwd, "strix"),
+		filepath.Join(cwd, "..", "strix-python"),
+		filepath.Join(cwd, "..", "strix"),
+		filepath.Join(cwd, "..", "..", "strix-python"),
+		filepath.Join(cwd, "..", "..", "strix"),
 	}
-	path = filepath.Join(cwd, "..", "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
+
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			toolsPath := filepath.Join(path, "tools")
+			if tInfo, err := os.Stat(toolsPath); err == nil && tInfo.IsDir() {
+				return path
+			}
+		}
 	}
-	path = filepath.Join(cwd, "..", "..", "strix")
-	if _, err := os.Stat(path); err == nil {
-		return path
-	}
-	return "strix"
+	return "strix-python"
 }
 
 func applyConfigFile(configPath string) error {
@@ -146,6 +154,10 @@ func buildSystemPromptContext() map[string]interface{} {
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
+	if review {
+		nonInteractive = true
+	}
+
 	if instruction != "" && instructionFile != "" {
 		return fmt.Errorf("cannot specify both --instruction and --instruction-file")
 	}
@@ -194,13 +206,17 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	slog.SetDefault(slog.New(handler))
 
+	modelName := llm.GetModelName()
+
 	// Print single notification to console
 	fmt.Printf("Logs are being saved to: %s\n", filepath.Join(baseDir, "strix.log"))
 	fmt.Printf("Agent activity is being saved to: %s\n", filepath.Join(baseDir, "agent.log"))
+	fmt.Printf("Model being used: %s\n", modelName)
 
 	slog.Info("STRIX Penetration Test Initiating...",
 		slog.Any("targets", targets),
 		slog.String("scan_mode", scanMode),
+		slog.String("model", modelName),
 		slog.Bool("non_interactive", nonInteractive),
 	)
 
@@ -211,6 +227,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	todo.RegisterTodoTools()
 	thinking.RegisterThinkingTools()
 	agents_graph.RegisterAgentsGraphTools()
+	agents_graph.ReviewAgents = review
 	finishpkg.RegisterFinishTools()
 
 	// 4. Resolve paths and load tool XML schemas dynamically
@@ -295,6 +312,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 
 	// Cleanup function to destroy all sandboxes
 	cleanup := func() {
+		printFindingsSummary()
 		slog.Info("Shutting down - cleaning up sandboxes...")
 		docker, err := runtime.NewDockerRuntime()
 		if err != nil {
@@ -321,10 +339,20 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// Listen for interrupt signal in goroutine
 	exitChan := make(chan struct{})
 	go func() {
-		<-sigChan
-		slog.Info("Received interrupt signal, initiating graceful shutdown...")
-		cancel()
-		close(exitChan)
+		for {
+			<-sigChan
+			if nonInteractive {
+				slog.Info("Received interrupt signal (CTRL-C). Attempting to stop the current active sub-agent...")
+				if agents.StopCurrentAgent() {
+					slog.Info("Sub-agent stopped. Resuming parent flow. Press CTRL-C again to stop the main scan.")
+					continue
+				}
+			}
+			slog.Info("Received interrupt signal, initiating graceful shutdown...")
+			cancel()
+			close(exitChan)
+			return
+		}
 	}()
 
 	scanFunc := func() error {
@@ -345,7 +373,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 		} else {
 			// Interactive TUI mode
 			slog.Info("Starting TUI...")
-			err := _interface.RunTUI(ctx, targets[0], scanMode, runDir, handler, scanFunc)
+			err := _interface.RunTUI(ctx, targets[0], scanMode, modelName, runDir, handler, scanFunc)
 			if err != nil {
 				scanErr <- fmt.Errorf("TUI execution failed: %w", err)
 				return
@@ -362,4 +390,100 @@ func runScan(cmd *cobra.Command, args []string) error {
 		slog.Info("Scan interrupted by user")
 		return nil
 	}
+}
+
+func printFindingsSummary() {
+	fmt.Println()
+	fmt.Println("================================================================================")
+	fmt.Println("                       STRIX PENETRATION TEST SUMMARY                           ")
+	fmt.Println("================================================================================")
+
+	// 1. Print Agent Statuses
+	fmt.Println("\n🤖 [AGENT STATUSES]")
+	agents_graph.GraphLock.RLock()
+	var agentIDs []string
+	for id := range agents_graph.AgentNodes {
+		agentIDs = append(agentIDs, id)
+	}
+	// Sort by CreatedAt or ID
+	for i := 0; i < len(agentIDs)-1; i++ {
+		for j := i + 1; j < len(agentIDs); j++ {
+			nodeI := agents_graph.AgentNodes[agentIDs[i]]
+			nodeJ := agents_graph.AgentNodes[agentIDs[j]]
+			if nodeJ.CreatedAt.Before(nodeI.CreatedAt) {
+				agentIDs[i], agentIDs[j] = agentIDs[j], agentIDs[i]
+			}
+		}
+	}
+	for _, id := range agentIDs {
+		node := agents_graph.AgentNodes[id]
+		fmt.Printf("- %s (%s): %s\n", node.Name, node.ID, node.Status)
+		if node.WaitingReason != "" {
+			fmt.Printf("  (Waiting: %s)\n", node.WaitingReason)
+		}
+	}
+	agents_graph.GraphLock.RUnlock()
+
+	// 2. Print Vulnerabilities
+	vulnerabilities := reporting.GetVulnerabilityReports()
+	fmt.Printf("\n🚨 [VULNERABILITIES IDENTIFIED (%d)]\n", len(vulnerabilities))
+	if len(vulnerabilities) == 0 {
+		fmt.Println("- No vulnerability reports generated so far.")
+	} else {
+		// Sort by CVSS Score desc
+		for i := 0; i < len(vulnerabilities)-1; i++ {
+			for j := i + 1; j < len(vulnerabilities); j++ {
+				if vulnerabilities[j].CVSSScore > vulnerabilities[i].CVSSScore {
+					vulnerabilities[i], vulnerabilities[j] = vulnerabilities[j], vulnerabilities[i]
+				}
+			}
+		}
+		for _, v := range vulnerabilities {
+			endpointInfo := ""
+			if v.Endpoint != "" {
+				method := "GET"
+				if v.Method != "" {
+					method = v.Method
+				}
+				endpointInfo = fmt.Sprintf(" [%s %s]", method, v.Endpoint)
+			}
+			fmt.Printf("- [%s - %.1f] %s on %s%s\n", 
+				strings.ToUpper(v.CVSSSeverity), 
+				v.CVSSScore, 
+				v.Title, 
+				v.Target,
+				endpointInfo,
+			)
+		}
+	}
+
+	// 3. Print Notes / Findings Summaries
+	allNotes := notes.GetNotesList()
+	fmt.Printf("\n📝 [NOTES & FINDINGS (%d)]\n", len(allNotes))
+	if len(allNotes) == 0 {
+		fmt.Println("- No notes recorded.")
+	} else {
+		// Filter and print notes
+		for _, n := range allNotes {
+			fmt.Printf("- [%s] %s\n", n.Category, n.Title)
+			// Truncate content preview to first few lines or characters
+			lines := strings.Split(n.Content, "\n")
+			previewLines := 0
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					fmt.Printf("  %s\n", trimmed)
+					previewLines++
+					if previewLines >= 3 {
+						break
+					}
+				}
+			}
+			if len(lines) > previewLines {
+				fmt.Println("  ...")
+			}
+		}
+	}
+	fmt.Println("================================================================================")
+	fmt.Println()
 }

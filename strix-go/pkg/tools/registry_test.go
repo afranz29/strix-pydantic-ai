@@ -105,6 +105,8 @@ func TestLoadSchemaParsesRawInvalidXML(t *testing.T) {
 func TestLoadSchemaAllProductionFiles(t *testing.T) {
 	// Resolve strix/tools directory relative to this package.
 	candidates := []string{
+		"../../../strix-python/tools",
+		"../../strix-python/tools",
 		"../../../strix/tools",
 		"../../strix/tools",
 	}
@@ -329,5 +331,73 @@ func TestValidateToolCallInContext(t *testing.T) {
 					tc.toolName, tc.context, err, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestXMLParameterNestedDescription(t *testing.T) {
+	xmlData := `
+<tools>
+  <tool name="test_tool">
+    <description>Main tool description</description>
+    <parameters>
+      <parameter name="param1" type="string" required="true">
+        <description>Nested description tag</description>
+      </parameter>
+      <parameter name="param2" type="string" required="false">
+        Plain chardata description
+      </parameter>
+    </parameters>
+  </tool>
+</tools>
+`
+	toolRegistry = make(map[string]ToolDefinition)
+
+	err := LoadSchema([]byte(xmlData))
+	if err != nil {
+		t.Fatalf("failed to load schema: %v", err)
+	}
+
+	def, exists := GetTool("test_tool")
+	if !exists {
+		t.Fatalf("expected tool test_tool to exist")
+	}
+
+	if len(def.Parsed.Parameters) != 2 {
+		t.Errorf("expected 2 parameters, got %d", len(def.Parsed.Parameters))
+	}
+
+	param1 := def.Parsed.Parameters[0]
+	if param1.getDescription() != "Nested description tag" {
+		t.Errorf("param1 should have nested description, got %q", param1.getDescription())
+	}
+
+	param2 := def.Parsed.Parameters[1]
+	if !strings.Contains(param2.getDescription(), "Plain chardata") {
+		t.Errorf("param2 should have chardata description, got %q", param2.getDescription())
+	}
+}
+
+func TestLoadSchemaMalformedXMLErrorReporting(t *testing.T) {
+	xmlData := `
+<tools>
+  <tool name="broken_tool">
+    <description>Tool with broken XML</description>
+    <parameters>
+      <parameter name="param1" type="string">
+        <unclosed>tag
+      </parameter>
+    </parameters>
+  </tool>
+</tools>
+`
+	toolRegistry = make(map[string]ToolDefinition)
+
+	err := LoadSchema([]byte(xmlData))
+	if err == nil {
+		t.Fatalf("expected error for malformed XML")
+	}
+
+	if !strings.Contains(err.Error(), "broken_tool") {
+		t.Errorf("error should mention tool name 'broken_tool', got: %v", err)
 	}
 }

@@ -26,29 +26,32 @@ type snapshotMsg struct {
 	runFinished bool
 }
 
-// focusSection constants: 0=agent tree, 1=todo tasks, 2=right panel
+// focusSection constants: 0=tree, 1=tasks, 2=findings, 3=logs
 const (
-	focusTree  = 0
-	focusTasks = 1
-	focusRight = 2
+	focusTree     = 0
+	focusTasks    = 1
+	focusFindings = 2
+	focusLogs     = 3
 )
 
 type model struct {
 	target               string
 	scanMode             string
+	modelName            string
 	logHandler           *StrixLogHandler
 	startTime            time.Time
 	elapsed              time.Duration
-	activeTab            int // 0: Logs, 1: Findings
-	focusSection         int // focusTree, focusTasks, focusRight
+	focusSection         int // focusTree, focusTasks, focusFindings, focusLogs
 	width                int
 	height               int
 	scanRunning          bool
 	runFinished          bool
 	leftTreeScrollOffset int
 	leftTaskScrollOffset int
-	rightScrollOffsets   [2]int
+	findingsScrollOffset int
+	logsScrollOffset     int
 	tailLogs             bool
+	confirmingQuit       bool
 
 	// Cached data updated by background snapshots — View() reads only these
 	cachedTreeStr string
@@ -97,59 +100,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
-			m.logHandler.Close()
-			return m, tea.Quit
-		case "tab":
-			m.focusSection = (m.focusSection + 1) % 3
-		case "right":
-			if m.focusSection == focusRight {
-				m.activeTab = (m.activeTab + 1) % 2
+			if m.confirmingQuit {
+				m.logHandler.Close()
+				return m, tea.Quit
 			} else {
-				m.focusSection = focusRight
+				m.confirmingQuit = true
 			}
-		case "left":
-			if m.focusSection == focusRight {
-				m.activeTab = (m.activeTab + 1) % 2
-			} else {
-				m.focusSection = focusTree
+		case "y":
+			if m.confirmingQuit {
+				m.logHandler.Close()
+				return m, tea.Quit
+			}
+		case "n", "esc":
+			if m.confirmingQuit {
+				m.confirmingQuit = false
+			}
+		case "tab":
+			if !m.confirmingQuit {
+				if m.focusSection == focusLogs {
+					m.focusSection = focusFindings
+				} else {
+					m.focusSection = focusLogs
+				}
 			}
 		case "up", "k":
-			switch m.focusSection {
-			case focusTree:
-				if m.leftTreeScrollOffset > 0 {
-					m.leftTreeScrollOffset--
-				}
-			case focusTasks:
-				if m.leftTaskScrollOffset > 0 {
-					m.leftTaskScrollOffset--
-				}
-			case focusRight:
-				if m.activeTab == 0 {
+			if !m.confirmingQuit {
+				switch m.focusSection {
+				case focusFindings:
+					if m.findingsScrollOffset > 0 {
+						m.findingsScrollOffset--
+					}
+				case focusLogs:
 					m.tailLogs = false
-				}
-				if m.rightScrollOffsets[m.activeTab] > 0 {
-					m.rightScrollOffsets[m.activeTab]--
+					if m.logsScrollOffset > 0 {
+						m.logsScrollOffset--
+					}
 				}
 			}
 		case "down", "j":
-			switch m.focusSection {
-			case focusTree:
-				m.leftTreeScrollOffset++
-			case focusTasks:
-				m.leftTaskScrollOffset++
-			case focusRight:
-				m.rightScrollOffsets[m.activeTab]++
+			if !m.confirmingQuit {
+				switch m.focusSection {
+				case focusFindings:
+					m.findingsScrollOffset++
+				case focusLogs:
+					m.logsScrollOffset++
+				}
 			}
 		case "t":
-			if m.focusSection == focusRight && m.activeTab == 0 {
+			if !m.confirmingQuit && m.focusSection == focusLogs {
 				m.tailLogs = true
 			}
-		case "1":
-			m.activeTab = 0
-			m.focusSection = focusRight
-		case "2":
-			m.activeTab = 1
-			m.focusSection = focusRight
 		}
 
 	case tea.WindowSizeMsg:
@@ -181,48 +181,26 @@ func (m model) View() string {
 		return "Terminal too small"
 	}
 
-	activeColor := lipgloss.Color("#22c55e")
-	inactiveColor := lipgloss.Color("#15803d")
+	activeColor := lipgloss.Color("#ffffff")
+	inactiveColor := lipgloss.Color("#737373")
 	dimColor := lipgloss.Color("#404040")
 
-	availableHeight := m.height - 5
+	availableHeight := m.height - 3 // Only footer now
 	if availableHeight < 5 {
 		availableHeight = 5
 	}
 
 	leftTotalWidth := m.width / 3
+	if leftTotalWidth*3 < m.width {
+		leftTotalWidth++
+	}
+	if leftTotalWidth < 30 && m.width > 30 {
+		leftTotalWidth = 30
+	}
 	rightTotalWidth := m.width - leftTotalWidth
 
 	leftWidth := leftTotalWidth - 2
 	rightWidth := rightTotalWidth - 2
-
-	// Header
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#15803d")).
-		Padding(0, 2).
-		Width(m.width).
-		MaxHeight(1)
-
-	headerText := fmt.Sprintf("STRIX ORCHESTRATOR | Target: %s | Mode: %s | Time: %s",
-		m.target, m.scanMode, formatDuration(m.elapsed))
-	header := headerStyle.Render(truncateString(headerText, m.width-4))
-
-	// Tabs (right panel)
-	tabStyle := lipgloss.NewStyle().Padding(0, 2).Background(lipgloss.Color("#262626")).Foreground(lipgloss.Color("#a3a3a3"))
-	activeTabStyle := lipgloss.NewStyle().Padding(0, 2).Bold(true).Background(lipgloss.Color("#22c55e")).Foreground(lipgloss.Color("#000000"))
-
-	tabs := []string{"[1] Log Stream", "[2] Findings"}
-	var tabViews []string
-	for i, t := range tabs {
-		if i == m.activeTab {
-			tabViews = append(tabViews, activeTabStyle.Render(t))
-		} else {
-			tabViews = append(tabViews, tabStyle.Render(t))
-		}
-	}
-	tabRow := lipgloss.NewStyle().Width(m.width).MaxHeight(1).Render(lipgloss.JoinHorizontal(lipgloss.Top, tabViews...))
 
 	// ── Left panel: agent tree (top) + todo tasks (bottom) ──
 	leftBorderColor := inactiveColor
@@ -237,9 +215,9 @@ func (m model) View() string {
 		Height(availableHeight).
 		MaxHeight(availableHeight)
 
-	// Split left panel height: 60% tree, 40% tasks (minimum 3 lines each)
+	// Split left panel height: 50% tree, 50% tasks (minimum 3 lines each)
 	innerHeight := availableHeight - 2 // subtract border
-	treeHeight := (innerHeight * 6) / 10
+	treeHeight := innerHeight / 2
 	if treeHeight < 3 {
 		treeHeight = 3
 	}
@@ -248,9 +226,16 @@ func (m model) View() string {
 		taskHeight = 2
 	}
 
-	// Title styles — active section gets bright green, inactive gets dim
-	activeTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(activeColor)
-	dimTitleStyle := lipgloss.NewStyle().Bold(false).Foreground(lipgloss.Color(dimColor))
+	// Title styles — active section gets bright green background, inactive gets subtle dark background
+	activeTitleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#000000")).
+		Background(activeColor)
+
+	dimTitleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#a3a3a3")).
+		Background(lipgloss.Color("#262626"))
 
 	treeTitleStyle := dimTitleStyle
 	taskTitleStyle := dimTitleStyle
@@ -279,11 +264,21 @@ func (m model) View() string {
 	if len(visibleTreeLines) > treeContentLines {
 		visibleTreeLines = visibleTreeLines[:treeContentLines]
 	}
+	// Pad to ensure fixed height of tree section
+	for len(visibleTreeLines) < treeContentLines {
+		visibleTreeLines = append(visibleTreeLines, "")
+	}
+	// Add padding space to non-empty tree lines
+	for i, line := range visibleTreeLines {
+		if line != "" {
+			visibleTreeLines[i] = " " + line
+		}
+	}
 
 	// Todo tasks — use cached slice, no lock needed
 	var taskLines []string
 	if len(m.cachedTodos) == 0 {
-		taskLines = []string{"No tasks yet."}
+		taskLines = []string{" No tasks yet."}
 	} else {
 		for _, t := range m.cachedTodos {
 			statusBox := "[ ]"
@@ -293,8 +288,8 @@ func (m model) View() string {
 			case "in_progress":
 				statusBox = "[/]"
 			}
-			line := fmt.Sprintf("%s %s (%s)", statusBox, t.Title, t.Priority)
-			rendered := lipgloss.NewStyle().Width(leftWidth - 2).Render(line)
+			line := fmt.Sprintf(" %s %s (%s)", statusBox, t.Title, t.Priority)
+			rendered := lipgloss.NewStyle().Width(leftWidth - 3).Render(line)
 			taskLines = append(taskLines, strings.Split(rendered, "\n")...)
 		}
 	}
@@ -315,22 +310,29 @@ func (m model) View() string {
 	if len(visibleTaskLines) > taskContentLines {
 		visibleTaskLines = visibleTaskLines[:taskContentLines]
 	}
+	// Pad to ensure fixed height of task section
+	for len(visibleTaskLines) < taskContentLines {
+		visibleTaskLines = append(visibleTaskLines, "")
+	}
 
-	divider := lipgloss.NewStyle().Foreground(inactiveColor).Render(strings.Repeat("─", leftWidth))
+	leftDivider := lipgloss.NewStyle().Foreground(dimColor).Render(strings.Repeat("─", leftWidth-2))
+
+	treeTitle := treeTitleStyle.Width(leftWidth - 2).Render(" AGENTS GRAPH")
+	taskTitle := taskTitleStyle.Width(leftWidth - 2).Render(" TODO TASKS")
 
 	leftContent := strings.Join([]string{
-		treeTitleStyle.Render("── Agents Graph ──"),
+		treeTitle,
 		strings.Join(visibleTreeLines, "\n"),
-		divider,
-		taskTitleStyle.Render("── Todo Tasks ──"),
+		leftDivider,
+		taskTitle,
 		strings.Join(visibleTaskLines, "\n"),
 	}, "\n")
 
 	leftBox := leftBoxStyle.Render(leftContent)
 
-	// ── Right panel ──
+	// ── Right panel: findings (top) + log stream (bottom) ──
 	rightBorderColor := inactiveColor
-	if m.focusSection == focusRight {
+	if m.focusSection == focusFindings || m.focusSection == focusLogs {
 		rightBorderColor = activeColor
 	}
 
@@ -341,132 +343,228 @@ func (m model) View() string {
 		Height(availableHeight).
 		MaxHeight(availableHeight)
 
-	rightContentHeight := availableHeight - 4
-	if rightContentHeight < 1 {
-		rightContentHeight = 1
+	// Split right panel height: 2/3 findings, 1/3 logs
+	findingsHeight := (innerHeight * 2) / 3
+	if findingsHeight < 3 {
+		findingsHeight = 3
+	}
+	logsHeight := innerHeight - findingsHeight - 1
+	if logsHeight < 2 {
+		logsHeight = 2
 	}
 
-	var rightView string
+	findingsTitleStyle := dimTitleStyle
+	logsTitleStyle := dimTitleStyle
+	switch m.focusSection {
+	case focusFindings:
+		findingsTitleStyle = activeTitleStyle
+	case focusLogs:
+		logsTitleStyle = activeTitleStyle
+	}
 
-	switch m.activeTab {
-	case 0: // Log Stream
-		logs := m.logHandler.GetTuiLogs()
-
-		var wrappedLines []string
-		for _, log := range logs {
-			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(log)
-			wrappedLines = append(wrappedLines, strings.Split(wrapped, "\n")...)
+	// Findings content
+	var findingsView string
+	if len(m.cachedNotes) == 0 {
+		findingsView = " No findings/notes recorded yet."
+	} else {
+		if m.renderer == nil || m.lastRendererWidth != rightWidth {
+			renderer, _ := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(rightWidth-6),
+			)
+			m.renderer = renderer
+			m.lastRendererWidth = rightWidth
 		}
 
-		if m.tailLogs {
-			if len(wrappedLines) > rightContentHeight {
-				m.rightScrollOffsets[0] = len(wrappedLines) - rightContentHeight
-			} else {
-				m.rightScrollOffsets[0] = 0
-			}
-		}
+		var sb strings.Builder
+		for _, n := range m.cachedNotes {
+			header := lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#d4d4d4")).
+				Render(fmt.Sprintf(" [ %s ] (%s)", n.Title, n.Category))
+			sb.WriteString(header + "\n")
 
-		maxOffset := len(wrappedLines) - rightContentHeight
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-		if m.rightScrollOffsets[0] > maxOffset {
-			m.rightScrollOffsets[0] = maxOffset
-		}
-		if m.rightScrollOffsets[0] < 0 {
-			m.rightScrollOffsets[0] = 0
-		}
-
-		visibleLogs := wrappedLines
-		if len(wrappedLines) > m.rightScrollOffsets[0] {
-			visibleLogs = wrappedLines[m.rightScrollOffsets[0]:]
-		}
-		if len(visibleLogs) > rightContentHeight {
-			visibleLogs = visibleLogs[:rightContentHeight]
-		}
-		rightView = strings.Join(visibleLogs, "\n")
-
-	case 1: // Findings — use cached notes, no lock needed
-		if len(m.cachedNotes) == 0 {
-			rightView = "No findings/notes recorded yet."
-		} else {
-			// Create or update renderer only when width changes to avoid expensive recreation
-			if m.renderer == nil || m.lastRendererWidth != rightWidth {
-				renderer, _ := glamour.NewTermRenderer(
-					glamour.WithAutoStyle(),
-					glamour.WithWordWrap(rightWidth-4),
-				)
-				m.renderer = renderer
-				m.lastRendererWidth = rightWidth
-			}
-
-			var sb strings.Builder
-			for _, n := range m.cachedNotes {
-				header := lipgloss.NewStyle().
-					Bold(true).
-					Foreground(lipgloss.Color("#22c55e")).
-					Render(fmt.Sprintf("[ %s ] (%s) - %s", n.Title, n.Category, n.UpdatedAt))
-				sb.WriteString(header + "\n")
-
-				if m.renderer != nil {
-					content, err := m.renderer.Render(n.Content)
-					if err == nil {
-						sb.WriteString(content)
-					} else {
-						sb.WriteString(n.Content + "\n")
+			if m.renderer != nil {
+				content, err := m.renderer.Render(n.Content)
+				if err == nil {
+					// Add indent to markdown content
+					lines := strings.Split(strings.TrimSpace(content), "\n")
+					for _, l := range lines {
+						sb.WriteString("  " + l + "\n")
 					}
 				} else {
-					sb.WriteString(n.Content + "\n")
+					sb.WriteString("  " + n.Content + "\n")
 				}
-				sb.WriteString("\n")
+			} else {
+				sb.WriteString("  " + n.Content + "\n")
 			}
+			sb.WriteString("\n")
+		}
+		findingsView = sb.String()
+	}
 
-			wrappedLines := strings.Split(sb.String(), "\n")
+	findingsLines := strings.Split(findingsView, "\n")
+	findingsContentLines := findingsHeight - 1
+	if findingsContentLines < 1 {
+		findingsContentLines = 1
+	}
 
-			maxOffset := len(wrappedLines) - rightContentHeight
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-			if m.rightScrollOffsets[1] > maxOffset {
-				m.rightScrollOffsets[1] = maxOffset
-			}
-			if m.rightScrollOffsets[1] < 0 {
-				m.rightScrollOffsets[1] = 0
-			}
+	maxFindingsOffset := len(findingsLines) - findingsContentLines
+	if maxFindingsOffset < 0 {
+		maxFindingsOffset = 0
+	}
+	if m.findingsScrollOffset > maxFindingsOffset {
+		m.findingsScrollOffset = maxFindingsOffset
+	}
+	if m.findingsScrollOffset < 0 {
+		m.findingsScrollOffset = 0
+	}
 
-			visibleLines := wrappedLines
-			if len(wrappedLines) > m.rightScrollOffsets[1] {
-				visibleLines = wrappedLines[m.rightScrollOffsets[1]:]
+	visibleFindingsLines := findingsLines[m.findingsScrollOffset:]
+	if len(visibleFindingsLines) > findingsContentLines {
+		visibleFindingsLines = visibleFindingsLines[:findingsContentLines]
+	}
+	// Pad to ensure fixed height of findings section
+	for len(visibleFindingsLines) < findingsContentLines {
+		visibleFindingsLines = append(visibleFindingsLines, "")
+	}
+
+	// Logs content
+	logs := m.logHandler.GetTuiLogs()
+	var wrappedLogs []string
+	for _, log := range logs {
+		// Detect prefix length (e.g., "[12:34:56] INF: ") to apply hanging indent
+		prefixLen := 16
+		if idx := strings.Index(log, ": "); idx != -1 {
+			prefixLen = idx + 2
+		}
+
+		if len(log) <= prefixLen {
+			wrappedLogs = append(wrappedLogs, " "+log)
+			continue
+		}
+
+		prefix := log[:prefixLen]
+		message := log[prefixLen:]
+
+		msgWidth := rightWidth - 4 - prefixLen
+		if msgWidth < 10 {
+			// Fallback for very narrow terminals
+			wrapped := lipgloss.NewStyle().Width(rightWidth - 4).Render(log)
+			for _, l := range strings.Split(wrapped, "\n") {
+				wrappedLogs = append(wrappedLogs, " "+l)
 			}
-			if len(visibleLines) > rightContentHeight {
-				visibleLines = visibleLines[:rightContentHeight]
+			continue
+		}
+
+		wrappedMsg := lipgloss.NewStyle().Width(msgWidth).Render(message)
+		msgLines := strings.Split(strings.TrimSpace(wrappedMsg), "\n")
+
+		for i, l := range msgLines {
+			if i == 0 {
+				wrappedLogs = append(wrappedLogs, " "+prefix+strings.TrimSpace(l))
+			} else {
+				wrappedLogs = append(wrappedLogs, " "+strings.Repeat(" ", prefixLen)+strings.TrimSpace(l))
 			}
-			rightView = strings.Join(visibleLines, "\n")
 		}
 	}
 
-	rightTitleText := fmt.Sprintf("── %s ──", tabs[m.activeTab])
-	if m.activeTab == 0 && m.tailLogs {
-		rightTitleText += " (Tailing)"
+	logsContentLines := logsHeight - 1
+	if logsContentLines < 1 {
+		logsContentLines = 1
 	}
-	rightContent := fmt.Sprintf("%s\n%s", activeTitleStyle.Render(rightTitleText), rightView)
+
+	if m.tailLogs {
+		if len(wrappedLogs) > logsContentLines {
+			m.logsScrollOffset = len(wrappedLogs) - logsContentLines
+		} else {
+			m.logsScrollOffset = 0
+		}
+	}
+
+	maxLogsOffset := len(wrappedLogs) - logsContentLines
+	if maxLogsOffset < 0 {
+		maxLogsOffset = 0
+	}
+	if m.logsScrollOffset > maxLogsOffset {
+		m.logsScrollOffset = maxLogsOffset
+	}
+	if m.logsScrollOffset < 0 {
+		m.logsScrollOffset = 0
+	}
+
+	visibleLogsLines := wrappedLogs[m.logsScrollOffset:]
+	if len(visibleLogsLines) > logsContentLines {
+		visibleLogsLines = visibleLogsLines[:logsContentLines]
+	}
+	// Pad to ensure fixed height of logs section
+	for len(visibleLogsLines) < logsContentLines {
+		visibleLogsLines = append(visibleLogsLines, "")
+	}
+
+	rightDivider := lipgloss.NewStyle().Foreground(dimColor).Render(strings.Repeat("─", rightWidth-2))
+
+	logsTitleText := " LOG STREAM"
+	if m.tailLogs {
+		logsTitleText += " (TAILING)"
+	}
+
+	findingsTitle := findingsTitleStyle.Width(rightWidth - 2).Render(" FINDINGS")
+	logsTitle := logsTitleStyle.Width(rightWidth - 2).Render(logsTitleText)
+
+	rightContent := strings.Join([]string{
+		findingsTitle,
+		strings.Join(visibleFindingsLines, "\n"),
+		rightDivider,
+		logsTitle,
+		strings.Join(visibleLogsLines, "\n"),
+	}, "\n")
+
+
 	rightBox := rightBoxStyle.Render(rightContent)
 
 	mainLayout := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
-	// Footer
-	footerSeparator := lipgloss.NewStyle().
-		Foreground(inactiveColor).
-		Render(strings.Repeat("─", m.width))
+	// Footer: Consolidated Status Bar
+	statusStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#000000")).
+		Background(lipgloss.Color("#ffffff")).
+		Padding(0, 1)
 
-	footerStyle := lipgloss.NewStyle().
+	metadataStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ffffff")).
+		Background(lipgloss.Color("#404040")).
+		Padding(0, 1)
+
+	helpStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#a3a3a3")).
-		Width(m.width).
-		MaxHeight(1)
-	footerText := " Tab: Cycle focus | Arrows/JK: Scroll | 1,2: Tabs | T: Tail Logs | Q: Quit"
-	footer := footerStyle.Render(truncateString(footerText, m.width))
+		Background(lipgloss.Color("#262626")).
+		Padding(0, 1)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, tabRow, mainLayout, footerSeparator, footer)
+	statusPart := statusStyle.Render("STRIX")
+	metaText := fmt.Sprintf("%s | %s | %s | %s", m.target, m.scanMode, m.modelName, formatDuration(m.elapsed))
+	metaPart := metadataStyle.Render(metaText)
+
+	var helpText string
+	if m.confirmingQuit {
+		helpText = "QUIT? (Y: YES | N: NO)"
+	} else {
+		helpText = "TAB: FOCUS | ARROWS: SCROLL | T: TAIL | Q: QUIT"
+	}
+	helpPart := helpStyle.Render(helpText)
+
+	// Calculate space for the gap
+	fixedWidth := lipgloss.Width(statusPart) + lipgloss.Width(metaPart) + lipgloss.Width(helpPart)
+	gapWidth := m.width - fixedWidth
+	if gapWidth < 0 {
+		gapWidth = 0
+	}
+	gapPart := helpStyle.Width(gapWidth).Render("")
+
+	footer := lipgloss.JoinHorizontal(lipgloss.Top, statusPart, metaPart, gapPart, helpPart)
+
+	return lipgloss.JoinVertical(lipgloss.Left, mainLayout, footer)
 }
 
 func formatDuration(d time.Duration) string {
@@ -493,16 +591,16 @@ func buildTreeStringLocked(id string, indent string, isLast bool, depth int) str
 		return ""
 	}
 
-	statusColor := "#a3a3a3"
+	statusColor := "#737373"
 	switch node.Status {
 	case "running":
-		statusColor = "#22c55e"
+		statusColor = "#ffffff"
 	case "waiting":
-		statusColor = "#eab308"
+		statusColor = "#a3a3a3"
 	case "finished":
-		statusColor = "#3b82f6"
+		statusColor = "#d4d4d4"
 	case "failed":
-		statusColor = "#ef4444"
+		statusColor = "#ffffff" // Bold white for failure too, maybe with bold
 	}
 
 	var prefix string
@@ -553,14 +651,15 @@ func truncateString(s string, maxLen int) string {
 }
 
 // RunTUI runs the Strix scan within a background goroutine and monitors it using Bubble Tea.
-func RunTUI(ctx context.Context, target, scanMode, runDir string, handler *StrixLogHandler, scanFunc func() error) error {
+func RunTUI(ctx context.Context, target, scanMode, modelName, runDir string, handler *StrixLogHandler, scanFunc func() error) error {
 	m := model{
 		target:       target,
 		scanMode:     scanMode,
+		modelName:    modelName,
 		logHandler:   handler,
 		startTime:    time.Now(),
 		scanRunning:  true,
-		focusSection: focusRight,
+		focusSection: focusLogs,
 		tailLogs:     true,
 	}
 

@@ -18,6 +18,8 @@ type tuiState struct {
 	systemFile *os.File
 	agentFile  *os.File
 	writeStdout bool
+	spinnerIdx int
+	lastStatus string
 }
 
 // StrixLogHandler is a custom slog handler that routes logs to different files
@@ -88,9 +90,8 @@ func (h *StrixLogHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	// Update TUI buffer if it's agent activity or lifecycle and level is Info or higher
 	if (isAgentActivity || isLifecycle) && r.Level >= slog.LevelInfo {
-		// Filter out verbose system setup / Docker / framework noise from the TUI
-		if !strings.Contains(msgLower, "sandbox container") &&
-			!strings.Contains(msgLower, "docker image") &&
+		// Filter out only the most verbose system setup / Docker / framework noise from the TUI
+		if !strings.Contains(msgLower, "reusing parent sandbox") &&
 			!strings.Contains(msgLower, "notes database") &&
 			!strings.Contains(msgLower, "tool schemas") &&
 			!strings.Contains(msgLower, "gemini client") {
@@ -102,40 +103,96 @@ func (h *StrixLogHandler) Handle(ctx context.Context, r slog.Record) error {
 	return err
 }
 
+var spinnerChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func (h *StrixLogHandler) appendToTuiBuffer(r slog.Record) {
-	timeStr := r.Time.Format("15:04:05")
-	var levelStr string
-	switch r.Level {
-	case slog.LevelInfo:
-		levelStr = "INF"
-	case slog.LevelWarn:
-		levelStr = "WRN"
-	case slog.LevelError:
-		levelStr = "ERR"
-	default:
-		levelStr = r.Level.String()
+	// Format with emoji indicators and high-level findings
+	symbol := "→"
+	msgLower := strings.ToLower(r.Message)
+
+	// Show activity spinner for LLM and processing activities
+	if strings.Contains(msgLower, "sending request to llm") ||
+	   strings.Contains(msgLower, "requesting llm completion") ||
+	   strings.Contains(msgLower, "proxying tool execution") {
+		h.shared.mu.Lock()
+		h.shared.spinnerIdx = (h.shared.spinnerIdx + 1) % len(spinnerChars)
+		spinner := spinnerChars[h.shared.spinnerIdx]
+		h.shared.lastStatus = fmt.Sprintf("%s %s", spinner, r.Message)
+		if h.shared.writeStdout {
+			fmt.Print("\r" + h.shared.lastStatus + "                    ")
+		}
+		h.shared.mu.Unlock()
+		return
 	}
 
-	msg := fmt.Sprintf("[%s] %s: %s", timeStr, levelStr, r.Message)
-	omittedAttrs := 0
+	// Map messages to appropriate symbols
+	switch {
+	case strings.Contains(msgLower, "penetration test initiating"):
+		symbol = "→"
+	case strings.Contains(msgLower, "spawning agent"):
+		symbol = "🚀"
+	case strings.Contains(msgLower, "starting agent execution"):
+		symbol = "⚙"
+	case strings.Contains(msgLower, "invoking tool"):
+		symbol = "🔧"
+	case strings.Contains(msgLower, "tool executed successfully"):
+		symbol = "✓"
+	case strings.Contains(msgLower, "graph of agents"):
+		symbol = "📊"
+	case strings.Contains(msgLower, "registered new agent"):
+		symbol = "📝"
+	case strings.Contains(msgLower, "llm completion received"):
+		symbol = "💭"
+	case strings.Contains(msgLower, "agent entering wait"):
+		symbol = "⏸"
+	case strings.Contains(msgLower, "wait state timed out"):
+		symbol = "⏱"
+	case strings.Contains(msgLower, "tool execution failed"):
+		symbol = "❌"
+	case strings.Contains(msgLower, "error") || r.Level == slog.LevelError:
+		symbol = "❌"
+	case strings.Contains(msgLower, "warn") || r.Level == slog.LevelWarn:
+		symbol = "⚠"
+	case strings.Contains(msgLower, "finish"):
+		symbol = "🏁"
+	case strings.Contains(msgLower, "discovered") || strings.Contains(msgLower, "found"):
+		symbol = "🔍"
+	case strings.Contains(msgLower, "vulnerability") || strings.Contains(msgLower, "vulnerable"):
+		symbol = "🚨"
+	case strings.Contains(msgLower, "creating") || strings.Contains(msgLower, "created"):
+		symbol = "✨"
+	}
+
+	msg := fmt.Sprintf("%s %s", symbol, r.Message)
+
+	// Add key attributes
+	var attrs []string
+	var omittedCount int
 	r.Attrs(func(a slog.Attr) bool {
-		// Clean up the TUI log message by omitting agent/parent ID noise in the printed line.
-		if a.Key == "agent_id" || a.Key == "child_id" || a.Key == "parent_id" {
-			return true
-		}
-		if slices.Contains([]string{"completion", "kwargs", "result"}, a.Key) {
-			omittedAttrs++
+		// Omit only the most verbose attributes
+		if slices.Contains([]string{"completion", "kwargs"}, a.Key) {
+			omittedCount++
 			return true
 		}
 
+		// Skip IDs for cleaner output
+		if slices.Contains([]string{"agent_id", "child_id"}, a.Key) {
+			return true
+		}
+
+		// Include everything else: results, findings, tool details, etc.
 		value := sanitizeTuiAttrValue(a.Value.Any())
 		if value != "" {
-			msg += fmt.Sprintf(" %s=%s", a.Key, value)
+			attrs = append(attrs, fmt.Sprintf("%s=%s", a.Key, value))
 		}
 		return true
 	})
-	if omittedAttrs > 0 {
-		msg += fmt.Sprintf(" details_omitted=%d", omittedAttrs)
+
+	if len(attrs) > 0 {
+		msg += " " + strings.Join(attrs, " ")
+	}
+	if omittedCount > 0 {
+		msg += fmt.Sprintf(" [+%d details]", omittedCount)
 	}
 
 	h.shared.mu.Lock()
@@ -144,8 +201,11 @@ func (h *StrixLogHandler) appendToTuiBuffer(r slog.Record) {
 	if len(h.shared.tuiLogs) > h.shared.maxTuiLogs {
 		h.shared.tuiLogs = h.shared.tuiLogs[1:]
 	}
+	h.shared.lastStatus = msg
 
 	if h.shared.writeStdout {
+		// Clear spinner line and print new message
+		fmt.Print("\r")
 		fmt.Println(msg)
 	}
 }
@@ -157,7 +217,7 @@ func sanitizeTuiAttrValue(v interface{}) string {
 	if s == "" {
 		return ""
 	}
-	const maxLen = 160
+	const maxLen = 300
 	if len(s) > maxLen {
 		return s[:maxLen-3] + "..."
 	}

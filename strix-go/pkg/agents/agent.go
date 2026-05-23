@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,7 @@ type Agent struct {
 	ExecutionContext tools.ExecutionContext
 	AvailableTools   []string
 	OwnerSandbox     bool // true if this agent created the sandbox and should clean it up
+	Cancel           context.CancelFunc
 }
 
 type RunConfig struct {
@@ -101,6 +104,88 @@ func llmBackoffDelay(consecutiveErrors int) time.Duration {
 // completion.
 const toolFailureRepeatThreshold = 3
 
+// History pruning configuration. Keeps last N messages and redacts old base64
+// screenshots to prevent unbounded context growth.
+const (
+	historyMaxMessages = 50 // Keep last N messages in sliding window
+	base64Threshold    = 100 // Minimum length to consider as potential base64/screenshot
+)
+
+// validateToolAvailability checks that all requested skills/tools exist and are
+// available in the given execution context. Skips special skills like root_agent
+// that are bootstrap skills, not actual tools.
+func validateToolAvailability(skills []string, ctx tools.ExecutionContext) error {
+	// Special skills that don't need to be validated as tools
+	specialSkills := map[string]bool{
+		"root_agent": true, // Bootstrap skill for root agent
+	}
+
+	var missing []string
+	var unavailable []string
+
+	for _, skill := range skills {
+		// Skip special bootstrap skills
+		if specialSkills[skill] {
+			continue
+		}
+
+		if err := tools.ValidateToolCallInContext(skill, ctx); err != nil {
+			// Check if tool doesn't exist or isn't available in context
+			if strings.Contains(err.Error(), "does not exist") {
+				missing = append(missing, skill)
+			} else {
+				unavailable = append(unavailable, skill)
+			}
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("required tools not found: %v", missing)
+	}
+	if len(unavailable) > 0 {
+		return fmt.Errorf("required tools not available in %s context: %v", ctx, unavailable)
+	}
+
+	return nil
+}
+
+// pruneHistory enforces a sliding window on agent history and redacts old base64
+// screenshots. Keeps the last historyMaxMessages messages and redacts large
+// base64-like strings (screenshots) in messages older than the window.
+func pruneHistory(history []llm.Message) []llm.Message {
+	if len(history) <= historyMaxMessages {
+		return history
+	}
+
+	// Apply sliding window: keep last N messages
+	pruned := history[len(history)-historyMaxMessages:]
+
+	// Redact base64-like content (screenshots) in all but most recent messages
+	recentThreshold := len(pruned) - 10 // Keep most recent 10 messages unmodified
+	for i := 0; i < recentThreshold && i < len(pruned); i++ {
+		pruned[i].Content = redactBase64Content(pruned[i].Content)
+	}
+
+	return pruned
+}
+
+// redactBase64Content finds and redacts large base64-like strings (typically
+// screenshots) while preserving the message structure and other content.
+func redactBase64Content(content string) string {
+	// Match large base64-like strings (min 80 chars, consists of alphanumeric, +, /, =)
+	// This pattern targets base64 encoded images/screenshots in tool output
+	re := regexp.MustCompile(`[A-Za-z0-9+/=]{80,}`)
+	matches := re.FindAllString(content, -1)
+
+	result := content
+	for _, match := range matches {
+		// Replace with a placeholder indicating redaction
+		placeholder := fmt.Sprintf("[base64-redacted-%d]", len(match))
+		result = strings.ReplaceAll(result, match, placeholder)
+	}
+	return result
+}
+
 // toolCallSignature builds a stable string identifying a tool invocation so we
 // can detect identical retries. Go's encoding/json sorts map keys, giving a
 // deterministic output for map[string]interface{}.
@@ -121,9 +206,209 @@ func toolCallSignature(name string, kwargs map[string]interface{}) string {
 	return name + "|" + string(data)
 }
 
+var (
+	activeAgentsLock sync.RWMutex
+	activeAgents     = make(map[string]*Agent)
+)
+
+func RegisterActiveAgent(a *Agent) {
+	activeAgentsLock.Lock()
+	defer activeAgentsLock.Unlock()
+	activeAgents[a.ID] = a
+}
+
+func DeregisterActiveAgent(id string) {
+	activeAgentsLock.Lock()
+	defer activeAgentsLock.Unlock()
+	delete(activeAgents, id)
+}
+
 func InitOrchestrator() {
 	// Register the Spawn callback in the agents graph package to avoid circular imports
 	agents_graph.SpawnAgentFunc = SpawnAgent
+	tools.Register("load_skill", false, LoadSkill)
+}
+
+func LoadSkill(args map[string]interface{}) (interface{}, error) {
+	skillsStr, _ := args["skills"].(string)
+
+	var requestedSkills []string
+	for _, s := range strings.Split(skillsStr, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			requestedSkills = append(requestedSkills, s)
+		}
+	}
+
+	if len(requestedSkills) == 0 {
+		return map[string]interface{}{
+			"success":          false,
+			"error":            "No skills provided. Pass one or more comma-separated skill names.",
+			"requested_skills": []string{},
+		}, nil
+	}
+
+	// Validate that all skills exist
+	var invalidSkills []string
+	for _, skill := range requestedSkills {
+		_, err := llm.FindSkillFile(skill)
+		if err != nil {
+			invalidSkills = append(invalidSkills, skill)
+		}
+	}
+	if len(invalidSkills) > 0 {
+		return map[string]interface{}{
+			"success":          false,
+			"error":            fmt.Sprintf("Skill(s) not found: %s", strings.Join(invalidSkills, ", ")),
+			"requested_skills": requestedSkills,
+			"loaded_skills":    []string{},
+		}, nil
+	}
+
+	agentID, _ := args["agent_id"].(string)
+	activeAgentsLock.RLock()
+	a, ok := activeAgents[agentID]
+	activeAgentsLock.RUnlock()
+
+	if !ok {
+		return map[string]interface{}{
+			"success":          false,
+			"error":            fmt.Sprintf("Could not find running agent instance for runtime skill loading (agent_id=%s).", agentID),
+			"requested_skills": requestedSkills,
+			"loaded_skills":    []string{},
+		}, nil
+	}
+
+	var newlyLoaded []string
+	var alreadyLoaded []string
+	for _, skill := range requestedSkills {
+		exists := false
+		for _, s := range a.Skills {
+			if s == skill {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			alreadyLoaded = append(alreadyLoaded, skill)
+		} else {
+			a.Skills = append(a.Skills, skill)
+			newlyLoaded = append(newlyLoaded, skill)
+		}
+	}
+
+	mergedSkills := append([]string{}, a.Skills...)
+	if a.SystemContext == nil {
+		a.SystemContext = make(map[string]interface{})
+	}
+	a.SystemContext["loaded_skills"] = mergedSkills
+
+	return map[string]interface{}{
+		"success":               true,
+		"requested_skills":      requestedSkills,
+		"loaded_skills":         requestedSkills,
+		"newly_loaded_skills":   newlyLoaded,
+		"already_loaded_skills": alreadyLoaded,
+		"message":               "Skills loaded into this agent prompt context.",
+	}, nil
+}
+
+func StopCurrentAgent() bool {
+	agents_graph.GraphLock.Lock()
+	defer agents_graph.GraphLock.Unlock()
+
+	// 1. Find all active agent nodes with status "running" or "waiting"
+	var candidates []*agents_graph.AgentNode
+	for _, node := range agents_graph.AgentNodes {
+		if node.ID == agents_graph.RootAgentID {
+			// Do not stop the root agent via this path, to allow the root to handle errors/shutdown
+			continue
+		}
+		if node.Status == "running" || node.Status == "waiting" {
+			candidates = append(candidates, node)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return false
+	}
+
+	// 2. Find the most recently created candidate (latest CreatedAt)
+	var target *agents_graph.AgentNode
+	for _, c := range candidates {
+		if target == nil || c.CreatedAt.After(target.CreatedAt) {
+			target = c
+		}
+	}
+
+	if target == nil {
+		return false
+	}
+
+	// 3. Find the running Agent instance
+	activeAgentsLock.RLock()
+	a, ok := activeAgents[target.ID]
+	activeAgentsLock.RUnlock()
+
+	if !ok || a.Cancel == nil {
+		return false
+	}
+
+	slog.Info("Stopping active sub-agent via operator interrupt",
+		slog.String("agent_id", target.ID),
+		slog.String("name", target.Name),
+	)
+
+	// 4. Cancel the agent's context
+	a.Cancel()
+
+	// 5. Update graph status to failed
+	target.Status = "failed"
+	target.FinishedAt = time.Now().UTC()
+
+	// 6. Notify the parent agent if one exists
+	if target.ParentID != "" {
+		if parentNode, exists := agents_graph.AgentNodes[target.ParentID]; exists {
+			messageID := fmt.Sprintf("interrupt_%d", time.Now().UnixNano()/1e6%1000000)
+			interruptMessage := fmt.Sprintf(
+				"<inter_agent_message>\n"+
+				"Agent Identity:\n"+
+				"- ID: %s\n"+
+				"- Name: %s\n\n"+
+				"Notification: This agent was interrupted and stopped by the operator. Any task delegated to it has failed.\n"+
+				"</inter_agent_message>",
+				target.ID, target.Name,
+			)
+			message := agents_graph.AgentMessage{
+				ID:        messageID,
+				From:      target.ID,
+				To:        target.ParentID,
+				Content:   interruptMessage,
+				MsgType:   "information",
+				Priority:  "high",
+				Timestamp: time.Now().UTC(),
+			}
+
+			// Enqueue message to parent inbox channel
+			select {
+			case parentNode.Inbox <- message:
+				parentNode.ConversationHistory = append(parentNode.ConversationHistory, llm.Message{
+					Role:    "user",
+					Content: message.Content,
+				})
+				slog.Info("Notified parent agent of sub-agent interrupt",
+					slog.String("parent_id", target.ParentID),
+					slog.String("sub_agent_id", target.ID),
+				)
+			default:
+				slog.Warn("Failed to enqueue interrupt message to parent inbox (channel full)",
+					slog.String("parent_id", target.ParentID),
+				)
+			}
+		}
+	}
+
+	return true
 }
 
 func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, skills []string) error {
@@ -134,8 +419,11 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 		slog.Any("skills", skills),
 	)
 
-	llmClient, err := llm.NewLLMClient(ctx)
+	agentCtx, agentCancel := context.WithCancel(ctx)
+
+	llmClient, err := llm.NewLLMClient(agentCtx)
 	if err != nil {
+		agentCancel()
 		return fmt.Errorf("failed to initialize LLM client: %w", err)
 	}
 
@@ -164,7 +452,11 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 		SystemContext:    cfg.SystemPromptContext,
 		ExecutionContext: tools.ExecutionContextParent, // Will be updated if sandbox is available
 		AvailableTools:   tools.GetAvailableTools(tools.ExecutionContextParent),
+		Cancel:           agentCancel,
 	}
+
+	RegisterActiveAgent(agent)
+	defer DeregisterActiveAgent(childID)
 
 	// 1. Resolve Sandbox association: reuse parent's sandbox or create a new one
 	if parentID != "" {
@@ -217,7 +509,12 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 	agent.SandboxClient = runtime.NewSandboxClient(agent.Sandbox.APIURL, agent.Sandbox.AuthToken)
 	agent.syncConversationHistory()
 
-	return agent.Run(ctx)
+	// Validate that all requested skills/tools exist before starting execution
+	if err := validateToolAvailability(agent.Skills, agent.ExecutionContext); err != nil {
+		return fmt.Errorf("tool validation failed for agent %s: %w", childID, err)
+	}
+
+	return agent.Run(agentCtx)
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -283,7 +580,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to compile system prompt: %w", err)
 		}
 
-		// 2. Chat completion
+		// 2. Prune history to prevent unbounded context growth
+		a.History = pruneHistory(a.History)
+
+		// 3. Chat completion
 		slog.Debug("Requesting LLM completion",
 			slog.String("agent_id", a.ID),
 			slog.String("agent_name", a.Name),

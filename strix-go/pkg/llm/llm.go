@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/anthropic"
 	"github.com/tmc/langchaingo/llms/googleai"
 	"github.com/tmc/langchaingo/llms/openai"
 )
@@ -25,7 +26,11 @@ type LLMClient struct {
 func NewLLMClient(ctx context.Context) (*LLMClient, error) {
 	model := os.Getenv("STRIX_LLM")
 	if model == "" {
-		model = "gemini-3.5-flash" // Default to Gemini first
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			model = "claude-haiku-4-5"
+		} else {
+			model = "gemini-3.5-flash"
+		}
 	}
 
 	apiKey := os.Getenv("LLM_API_KEY")
@@ -125,6 +130,45 @@ func NewLLMClient(ctx context.Context) (*LLMClient, error) {
 		return &LLMClient{
 			llm:       cli,
 			modelName: deploymentName,
+		}, nil
+	}
+
+	// Determine if it is an Anthropic model
+	isAnthropic := strings.HasPrefix(model, "anthropic/") ||
+		strings.HasPrefix(model, "claude-")
+
+	if isAnthropic {
+		anthropicKey := os.Getenv("ANTHROPIC_API_KEY")
+		if anthropicKey == "" {
+			anthropicKey = apiKey
+		}
+
+		canonicalModel := model
+		if strings.HasPrefix(model, "anthropic/") {
+			canonicalModel = strings.TrimPrefix(model, "anthropic/")
+		}
+
+		slog.Info("Initializing Anthropic client", slog.String("model", canonicalModel))
+
+		var opts []anthropic.Option
+		if anthropicKey != "" {
+			opts = append(opts, anthropic.WithToken(anthropicKey))
+		}
+		opts = append(opts, anthropic.WithModel(canonicalModel))
+
+		apiBase := os.Getenv("LLM_API_BASE")
+		if apiBase != "" {
+			opts = append(opts, anthropic.WithBaseURL(apiBase))
+		}
+
+		cli, err := anthropic.New(opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create langchaingo anthropic client: %w", err)
+		}
+
+		return &LLMClient{
+			llm:       cli,
+			modelName: canonicalModel,
 		}, nil
 	}
 
@@ -253,4 +297,19 @@ func (c *LLMClient) GenerateChatCompletion(ctx context.Context, systemPrompt str
 	)
 
 	return resp.Choices[0].Content, nil
+}
+
+func (c *LLMClient) ModelName() string {
+	return c.modelName
+}
+
+func GetModelName() string {
+	model := os.Getenv("STRIX_LLM")
+	if model == "" {
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			return "claude-haiku-4-5"
+		}
+		return "gemini-3.5-flash"
+	}
+	return model
 }

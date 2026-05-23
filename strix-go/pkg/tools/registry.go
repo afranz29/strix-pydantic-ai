@@ -12,10 +12,11 @@ import (
 )
 
 type XMLParameter struct {
-	Name        string `xml:"name,attr"`
-	Type        string `xml:"type,attr"`
-	Required    string `xml:"required,attr"`
-	Description string `xml:",chardata"`
+	Name               string `xml:"name,attr"`
+	Type               string `xml:"type,attr"`
+	Required           string `xml:"required,attr"`
+	Description        string `xml:",chardata"`
+	NestedDescription  string `xml:"description"`
 }
 
 type XMLTool struct {
@@ -130,7 +131,12 @@ func LoadSchema(data []byte) error {
 
 		var xmlTool XMLTool
 		if err := xml.Unmarshal([]byte(sanitized), &xmlTool); err != nil {
-			parseErrors = append(parseErrors, fmt.Sprintf("xml unmarshal: %v", err))
+			// Try to extract tool name from rawXML for better error reporting
+			var toolName string
+			if nameMatch := regexp.MustCompile(`name="([^"]+)"`).FindStringSubmatch(rawXML); len(nameMatch) > 1 {
+				toolName = nameMatch[1]
+			}
+			parseErrors = append(parseErrors, fmt.Sprintf("tool %q xml unmarshal: %v", toolName, err))
 			continue
 		}
 		if xmlTool.Name == "" {
@@ -245,6 +251,15 @@ func GetTool(name string) (ToolDefinition, bool) {
 	defer registryLock.RUnlock()
 	def, exists := toolRegistry[name]
 	return def, exists
+}
+
+// getParameterDescription returns the description for a parameter, preferring
+// nested <description> tags over chardata for better XML compatibility.
+func (p XMLParameter) getDescription() string {
+	if p.NestedDescription != "" {
+		return p.NestedDescription
+	}
+	return p.Description
 }
 
 func NormalizeArguments(def ToolDefinition, kwargs map[string]interface{}) map[string]interface{} {

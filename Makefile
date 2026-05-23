@@ -81,8 +81,9 @@ test-cov:
 go-build:
 	@echo "🏗️ Building Go binary..."
 	mkdir -p strix-go/bin
-	cd strix-go && go build -o bin/strix ./cmd/strix
-	@echo "✅ Go binary built at strix-go/bin/strix"
+	cd strix-go && rm -f bin/strix && go build -o bin/strix ./cmd/strix
+	rm -f strix-cli && cp strix-go/bin/strix strix-cli
+	@echo "✅ Go binary built at strix-go/bin/strix and copied to ./strix-cli"
 
 go-test:
 	@echo "🧪 Running Go tests..."

@@ -1,11 +1,13 @@
 package agents_graph
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +59,9 @@ var (
 
 	// SpawnAgentFunc is a decoupling callback set by package agents to avoid circular dependencies
 	SpawnAgentFunc func(ctx context.Context, parentID, childID, childName, task string, skills []string) error
+
+	ReviewAgents    bool
+	StepReviewMutex sync.Mutex
 )
 
 func RegisterAgentsGraphTools() {
@@ -74,24 +79,77 @@ func generateAgentID() string {
 }
 
 func CreateAgent(args map[string]interface{}) (interface{}, error) {
-	GraphLock.Lock()
-	defer GraphLock.Unlock()
-
 	parentID, _ := args["agent_id"].(string)
 	task, _ := args["task"].(string)
 	name, _ := args["name"].(string)
 	rawSkills, _ := args["skills"].(string)
-	todoID, _ := args["todo_id"].(string)
-	inheritContext, ok := args["inherit_context"].(bool)
-	if !ok {
-		inheritContext = true
-	}
 
 	if strings.TrimSpace(task) == "" {
 		return map[string]interface{}{"success": false, "error": "Task description cannot be empty"}, nil
 	}
 	if strings.TrimSpace(name) == "" {
 		return map[string]interface{}{"success": false, "error": "Agent name cannot be empty"}, nil
+	}
+
+	if ReviewAgents {
+		StepReviewMutex.Lock()
+		fmt.Printf("\n🤖 [AGENT DELEGATION REVIEW] Parent agent '%s' wants to delegate a task to '%s'\n", parentID, name)
+		fmt.Printf("Task: %q\n\n", task)
+		if rawSkills != "" {
+			fmt.Printf("Skills: %q\n", rawSkills)
+		}
+
+		for {
+			fmt.Print("Action? (y = Approve, n = Reject & Give Feedback, e = Edit Task, c = Continue without further reviews, q = Quit): ")
+			var choice string
+			fmt.Scanln(&choice)
+			choice = strings.ToLower(strings.TrimSpace(choice))
+
+			if choice == "q" {
+				StepReviewMutex.Unlock()
+				os.Exit(0)
+			} else if choice == "c" {
+				ReviewAgents = false
+				fmt.Println("Auto-approving and continuing without further agent reviews.")
+				break
+			} else if choice == "n" {
+				fmt.Print("Enter rejection feedback for the parent agent: ")
+				reader := bufio.NewReader(os.Stdin)
+				feedback, _ := reader.ReadString('\n')
+				feedback = strings.TrimSpace(feedback)
+				if feedback == "" {
+					feedback = "Rejected by operator."
+				}
+				StepReviewMutex.Unlock()
+				return map[string]interface{}{
+					"success": false,
+					"error":   fmt.Sprintf("Operator rejected delegation: %s", feedback),
+				}, nil
+			} else if choice == "e" {
+				fmt.Print("Enter revised task description: ")
+				reader := bufio.NewReader(os.Stdin)
+				revisedTask, _ := reader.ReadString('\n')
+				revisedTask = strings.TrimSpace(revisedTask)
+				if revisedTask != "" {
+					task = revisedTask
+					args["task"] = task
+					fmt.Printf("Task revised to: %q\n", task)
+				}
+				break
+			} else if choice == "y" || choice == "" {
+				break
+			}
+		}
+		StepReviewMutex.Unlock()
+	}
+
+	GraphLock.Lock()
+	defer GraphLock.Unlock()
+
+	todoID, _ := args["todo_id"].(string)
+	inheritContext, ok := args["inherit_context"].(bool)
+	if !ok {
+		inheritContext = true
 	}
 
 	// **Check A: Idempotency check** — ensure no matching agent is already running or completed
@@ -171,8 +229,9 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	}
 
 	if SpawnAgentFunc != nil {
+		fn := SpawnAgentFunc
 		go func() {
-			_ = SpawnAgentFunc(context.Background(), parentID, childID, name, task, skills)
+			_ = fn(context.Background(), parentID, childID, name, task, skills)
 		}()
 	} else {
 		return map[string]interface{}{"success": false, "error": "Spawn agent hook is not configured"}, nil
@@ -322,9 +381,6 @@ func WaitForMessage(args map[string]interface{}) (interface{}, error) {
 }
 
 func AgentFinish(args map[string]interface{}) (interface{}, error) {
-	GraphLock.Lock()
-	defer GraphLock.Unlock()
-
 	agentID, _ := args["agent_id"].(string)
 	summary, _ := args["result_summary"].(string)
 	findings := interfaceSliceToStrings(args["findings"])
@@ -338,11 +394,18 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 		reportToParent = true
 	}
 
+	GraphLock.RLock()
 	node, exists := AgentNodes[agentID]
+	var hasParent bool
+	if exists {
+		hasParent = node.ParentID != ""
+	}
+	GraphLock.RUnlock()
+
 	if !exists {
 		return map[string]interface{}{"agent_completed": false, "error": "Agent not found"}, nil
 	}
-	if node.ParentID == "" {
+	if !hasParent {
 		return map[string]interface{}{
 			"agent_completed": false,
 			"error":           "This tool can only be used by subagents. Root/main agents must use finish_scan instead.",
@@ -350,6 +413,58 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 		}, nil
 	}
 
+	if ReviewAgents {
+		StepReviewMutex.Lock()
+		fmt.Printf("\n🏁 [AGENT COMPLETION REVIEW] Sub-agent '%s' is attempting to finish and report findings.\n", agentID)
+		fmt.Printf("Reported Summary: %q\n", summary)
+		if len(findings) > 0 {
+			fmt.Println("Findings:")
+			for _, f := range findings {
+				fmt.Printf("  - %s\n", f)
+			}
+		}
+		if len(finalRecommendations) > 0 {
+			fmt.Println("Recommendations:")
+			for _, r := range finalRecommendations {
+				fmt.Printf("  - %s\n", r)
+			}
+		}
+		fmt.Printf("Success status reported: %v\n", successVal)
+
+		for {
+			fmt.Print("Action? (y = Approve & Finish, n = Reject & Request Rework, c = Continue without further reviews, q = Quit): ")
+			var choice string
+			fmt.Scanln(&choice)
+			choice = strings.ToLower(strings.TrimSpace(choice))
+
+			if choice == "q" {
+				StepReviewMutex.Unlock()
+				os.Exit(0)
+			} else if choice == "c" {
+				ReviewAgents = false
+				fmt.Println("Auto-approving and continuing without further agent reviews.")
+				break
+			} else if choice == "n" {
+				fmt.Print("Enter rework instructions for the sub-agent: ")
+				reader := bufio.NewReader(os.Stdin)
+				instructions, _ := reader.ReadString('\n')
+				instructions = strings.TrimSpace(instructions)
+				if instructions == "" {
+					instructions = "Rework required by operator."
+				}
+				StepReviewMutex.Unlock()
+				return nil, fmt.Errorf("Operator requested rework: %s", instructions)
+			} else if choice == "y" || choice == "" {
+				break
+			}
+		}
+		StepReviewMutex.Unlock()
+	}
+
+	GraphLock.Lock()
+	defer GraphLock.Unlock()
+
+	node = AgentNodes[agentID]
 	node.Status = "finished"
 	if !successVal {
 		node.Status = "failed"

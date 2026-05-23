@@ -345,3 +345,14 @@ func CreateVulnerabilityReport(args map[string]interface{}) (interface{}, error)
 		"cvss_vector": cvssVector,
 	}, nil
 }
+
+func GetVulnerabilityReports() []*VulnerabilityReport {
+	reportsLock.RLock()
+	defer reportsLock.RUnlock()
+
+	list := make([]*VulnerabilityReport, 0, len(reportsStorage))
+	for _, r := range reportsStorage {
+		list = append(list, r)
+	}
+	return list
+}
