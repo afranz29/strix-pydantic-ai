@@ -104,12 +104,33 @@ func orderedSkills(skillNames []string, scanMode string) []string {
 	return deduped
 }
 
+// CompileSystemPrompt builds the system prompt for an agent
+// Deprecated: Use CompileSystemPromptWithContext instead
 func CompileSystemPrompt(
 	agentName string,
 	skillNames []string,
 	scanMode string,
 	interactive bool,
 	systemPromptContext map[string]interface{},
+) (string, error) {
+	return CompileSystemPromptWithContext(
+		agentName,
+		skillNames,
+		scanMode,
+		interactive,
+		systemPromptContext,
+		tools.ExecutionContextParent,
+	)
+}
+
+// CompileSystemPromptWithContext builds the system prompt for an agent with context-aware tools
+func CompileSystemPromptWithContext(
+	agentName string,
+	skillNames []string,
+	scanMode string,
+	interactive bool,
+	systemPromptContext map[string]interface{},
+	executionContext tools.ExecutionContext,
 ) (string, error) {
 	templatePath := filepath.Join(AgentsDir, agentName, "system_prompt.jinja")
 	tpl, err := pongo2.FromFile(templatePath)
@@ -125,8 +146,10 @@ func CompileSystemPrompt(
 			return loadSkillContent(name)
 		},
 		"get_tools_prompt": func() string {
-			return tools.GetToolsPrompt()
+			return tools.GetToolsPromptForContext(executionContext)
 		},
+		"available_tools": tools.GetAvailableTools(executionContext),
+		"execution_context": string(executionContext),
 		"system_prompt_context": systemPromptContext,
 	}
 

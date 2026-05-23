@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/usestrix/strix-go/pkg/tools/agents_graph"
 	"github.com/usestrix/strix-go/pkg/tools/notes"
@@ -17,21 +18,29 @@ import (
 // tickMsg is used for periodic TUI updates
 type tickMsg time.Time
 
+// focusSection constants: 0=agent tree, 1=todo tasks, 2=right panel
+const (
+	focusTree  = 0
+	focusTasks = 1
+	focusRight = 2
+)
+
 type model struct {
-	target             string
-	scanMode           string
-	logHandler         *StrixLogHandler
-	startTime          time.Time
-	elapsed            time.Duration
-	activeTab          int // 0: Logs, 1: Findings, 2: Todo Checklist
-	focusLeft          bool
-	width              int
-	height             int
-	scanRunning        bool
-	runFinished        bool
-	leftScrollOffset   int
-	rightScrollOffsets [3]int
-	tailLogs           bool
+	target               string
+	scanMode             string
+	logHandler           *StrixLogHandler
+	startTime            time.Time
+	elapsed              time.Duration
+	activeTab            int // 0: Logs, 1: Findings
+	focusSection         int // focusTree, focusTasks, focusRight
+	width                int
+	height               int
+	scanRunning          bool
+	runFinished          bool
+	leftTreeScrollOffset int
+	leftTaskScrollOffset int
+	rightScrollOffsets   [2]int
+	tailLogs             bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -48,25 +57,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logHandler.Close()
 			return m, tea.Quit
 		case "tab":
-			m.focusLeft = !m.focusLeft
+			m.focusSection = (m.focusSection + 1) % 3
 		case "right":
-			if m.focusLeft {
-				m.focusLeft = false
+			if m.focusSection == focusRight {
+				m.activeTab = (m.activeTab + 1) % 2
 			} else {
-				m.activeTab = (m.activeTab + 1) % 3
+				m.focusSection = focusRight
 			}
 		case "left":
-			if !m.focusLeft {
-				m.focusLeft = true
+			if m.focusSection == focusRight {
+				m.activeTab = (m.activeTab + 1) % 2
 			} else {
-				m.activeTab = (m.activeTab + 2) % 3
+				m.focusSection = focusTree
 			}
 		case "up", "k":
-			if m.focusLeft {
-				if m.leftScrollOffset > 0 {
-					m.leftScrollOffset--
+			switch m.focusSection {
+			case focusTree:
+				if m.leftTreeScrollOffset > 0 {
+					m.leftTreeScrollOffset--
 				}
-			} else {
+			case focusTasks:
+				if m.leftTaskScrollOffset > 0 {
+					m.leftTaskScrollOffset--
+				}
+			case focusRight:
 				if m.activeTab == 0 {
 					m.tailLogs = false
 				}
@@ -75,21 +89,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "down", "j":
-			if m.focusLeft {
-				m.leftScrollOffset++
-			} else {
+			switch m.focusSection {
+			case focusTree:
+				m.leftTreeScrollOffset++
+			case focusTasks:
+				m.leftTaskScrollOffset++
+			case focusRight:
 				m.rightScrollOffsets[m.activeTab]++
 			}
 		case "t":
-			if m.activeTab == 0 {
+			if m.focusSection == focusRight && m.activeTab == 0 {
 				m.tailLogs = true
 			}
 		case "1":
 			m.activeTab = 0
+			m.focusSection = focusRight
 		case "2":
 			m.activeTab = 1
-		case "3":
-			m.activeTab = 2
+			m.focusSection = focusRight
 		}
 
 	case tea.WindowSizeMsg:
@@ -121,12 +138,13 @@ func (m model) View() string {
 		return "Terminal too small"
 	}
 
-	activeBorderColor := lipgloss.Color("#22c55e")
-	inactiveBorderColor := lipgloss.Color("#15803d")
+	activeColor := lipgloss.Color("#22c55e")
+	inactiveColor := lipgloss.Color("#15803d")
+	dimColor := lipgloss.Color("#404040")
 
-	availableHeight := m.height - 7
-	if availableHeight < 1 {
-		availableHeight = 1
+	availableHeight := m.height - 5
+	if availableHeight < 5 {
+		availableHeight = 5
 	}
 
 	leftTotalWidth := m.width / 3
@@ -134,30 +152,6 @@ func (m model) View() string {
 
 	leftWidth := leftTotalWidth - 2
 	rightWidth := rightTotalWidth - 2
-
-	leftBorderColor := inactiveBorderColor
-	if m.focusLeft {
-		leftBorderColor = activeBorderColor
-	}
-
-	leftBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(leftBorderColor).
-		Width(leftWidth).
-		Height(availableHeight).
-		MaxHeight(availableHeight)
-
-	rightBorderColor := inactiveBorderColor
-	if !m.focusLeft {
-		rightBorderColor = activeBorderColor
-	}
-
-	rightBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(rightBorderColor).
-		Width(rightWidth).
-		Height(availableHeight).
-		MaxHeight(availableHeight)
 
 	// Header
 	headerStyle := lipgloss.NewStyle().
@@ -172,11 +166,11 @@ func (m model) View() string {
 		m.target, m.scanMode, formatDuration(m.elapsed))
 	header := headerStyle.Render(truncateString(headerText, m.width-4))
 
-	// Tabs
+	// Tabs (right panel)
 	tabStyle := lipgloss.NewStyle().Padding(0, 2).Background(lipgloss.Color("#262626")).Foreground(lipgloss.Color("#a3a3a3"))
 	activeTabStyle := lipgloss.NewStyle().Padding(0, 2).Bold(true).Background(lipgloss.Color("#22c55e")).Foreground(lipgloss.Color("#000000"))
 
-	tabs := []string{"[1] Log Stream", "[2] Notes / Findings", "[3] Todo Tasks"}
+	tabs := []string{"[1] Log Stream", "[2] Findings"}
 	var tabViews []string
 	for i, t := range tabs {
 		if i == m.activeTab {
@@ -187,7 +181,44 @@ func (m model) View() string {
 	}
 	tabRow := lipgloss.NewStyle().Width(m.width).MaxHeight(1).Render(lipgloss.JoinHorizontal(lipgloss.Top, tabViews...))
 
-	// Left panel: Agents Hierarchy tree
+	// ── Left panel: agent tree (top) + todo tasks (bottom) ──
+	leftBorderColor := inactiveColor
+	if m.focusSection == focusTree || m.focusSection == focusTasks {
+		leftBorderColor = activeColor
+	}
+
+	leftBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(leftBorderColor).
+		Width(leftWidth).
+		Height(availableHeight).
+		MaxHeight(availableHeight)
+
+	// Split left panel height: 60% tree, 40% tasks (minimum 3 lines each)
+	innerHeight := availableHeight - 2 // subtract border
+	treeHeight := (innerHeight * 6) / 10
+	if treeHeight < 3 {
+		treeHeight = 3
+	}
+	taskHeight := innerHeight - treeHeight - 1 // -1 for divider line
+	if taskHeight < 2 {
+		taskHeight = 2
+	}
+
+	// Title styles — active section gets bright green, inactive gets dim
+	activeTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(activeColor)
+	dimTitleStyle := lipgloss.NewStyle().Bold(false).Foreground(lipgloss.Color(dimColor))
+
+	treeTitleStyle := dimTitleStyle
+	taskTitleStyle := dimTitleStyle
+	switch m.focusSection {
+	case focusTree:
+		treeTitleStyle = activeTitleStyle
+	case focusTasks:
+		taskTitleStyle = activeTitleStyle
+	}
+
+	// Agent tree content
 	var treeView string
 	agents_graph.GraphLock.RLock()
 	rootID := agents_graph.RootAgentID
@@ -199,51 +230,96 @@ func (m model) View() string {
 		treeView = "Initializing Agent Orchestration Graph..."
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22c55e"))
-
-	// Truncate/slice tree view to fit left box with scrolling
-	treeLines := strings.Split(treeView, "\n")
-	treeLimit := availableHeight - 4
-	if treeLimit < 1 {
-		treeLimit = 1
+	treeLines := strings.Split(strings.TrimSpace(treeView), "\n")
+	treeContentLines := treeHeight - 1 // reserve 1 for title
+	if treeContentLines < 1 {
+		treeContentLines = 1
 	}
 
-	if m.leftScrollOffset > len(treeLines)-1 {
-		m.leftScrollOffset = len(treeLines) - 1
+	if m.leftTreeScrollOffset > len(treeLines)-1 {
+		m.leftTreeScrollOffset = len(treeLines) - 1
 	}
-	if m.leftScrollOffset < 0 {
-		m.leftScrollOffset = 0
+	if m.leftTreeScrollOffset < 0 {
+		m.leftTreeScrollOffset = 0
+	}
+	visibleTreeLines := treeLines[m.leftTreeScrollOffset:]
+	if len(visibleTreeLines) > treeContentLines {
+		visibleTreeLines = visibleTreeLines[:treeContentLines]
 	}
 
-	visibleTreeLines := treeLines
-	if len(treeLines) > m.leftScrollOffset {
-		visibleTreeLines = treeLines[m.leftScrollOffset:]
+	// Todo tasks content
+	todoList := todo.GetTodoList()
+	var taskLines []string
+	if len(todoList) == 0 {
+		taskLines = []string{"No tasks yet."}
+	} else {
+		for _, t := range todoList {
+			statusBox := "[ ]"
+			switch t.Status {
+			case "done":
+				statusBox = "[✓]"
+			case "in_progress":
+				statusBox = "[/]"
+			}
+			line := fmt.Sprintf("%s %s (%s)", statusBox, t.Title, t.Priority)
+			rendered := lipgloss.NewStyle().Width(leftWidth - 2).Render(line)
+			taskLines = append(taskLines, strings.Split(rendered, "\n")...)
+		}
 	}
-	if len(visibleTreeLines) > treeLimit {
-		visibleTreeLines = visibleTreeLines[:treeLimit]
-	}
-	treeView = strings.Join(visibleTreeLines, "\n")
 
-	leftContent := fmt.Sprintf("%s\n%s", titleStyle.Render("── Agents Graph ──"), treeView)
+	taskContentLines := taskHeight - 1 // reserve 1 for title
+	if taskContentLines < 1 {
+		taskContentLines = 1
+	}
+
+	if m.leftTaskScrollOffset > len(taskLines)-1 {
+		m.leftTaskScrollOffset = len(taskLines) - 1
+	}
+	if m.leftTaskScrollOffset < 0 {
+		m.leftTaskScrollOffset = 0
+	}
+	visibleTaskLines := taskLines[m.leftTaskScrollOffset:]
+	if len(visibleTaskLines) > taskContentLines {
+		visibleTaskLines = visibleTaskLines[:taskContentLines]
+	}
+
+	divider := lipgloss.NewStyle().Foreground(inactiveColor).Render(strings.Repeat("─", leftWidth))
+
+	leftContent := strings.Join([]string{
+		treeTitleStyle.Render("── Agents Graph ──"),
+		strings.Join(visibleTreeLines, "\n"),
+		divider,
+		taskTitleStyle.Render("── Todo Tasks ──"),
+		strings.Join(visibleTaskLines, "\n"),
+	}, "\n")
+
 	leftBox := leftBoxStyle.Render(leftContent)
 
-	// Right panel based on activeTab
-	var rightView string
+	// ── Right panel ──
+	rightBorderColor := inactiveColor
+	if m.focusSection == focusRight {
+		rightBorderColor = activeColor
+	}
+
+	rightBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(rightBorderColor).
+		Width(rightWidth).
+		Height(availableHeight).
+		MaxHeight(availableHeight)
+
 	rightContentHeight := availableHeight - 4
 	if rightContentHeight < 1 {
 		rightContentHeight = 1
 	}
 
+	var rightView string
+
 	switch m.activeTab {
-	case 0:
+	case 0: // Log Stream
 		logs := m.logHandler.GetTuiLogs()
 
 		var wrappedLines []string
-		// Optimization: only wrap logs that could possibly be visible
-		// This is still a bit naive but better than wrapping 500 lines every 150ms
-		// If tailing, we only need the last rightContentHeight lines.
-		// If scrolling, we need lines around the offset.
-
 		for _, log := range logs {
 			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(log)
 			wrappedLines = append(wrappedLines, strings.Split(wrapped, "\n")...)
@@ -257,8 +333,12 @@ func (m model) View() string {
 			}
 		}
 
-		if m.rightScrollOffsets[0] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
-			m.rightScrollOffsets[0] = len(wrappedLines) - 1
+		maxOffset := len(wrappedLines) - rightContentHeight
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.rightScrollOffsets[0] > maxOffset {
+			m.rightScrollOffsets[0] = maxOffset
 		}
 		if m.rightScrollOffsets[0] < 0 {
 			m.rightScrollOffsets[0] = 0
@@ -273,77 +353,51 @@ func (m model) View() string {
 		}
 		rightView = strings.Join(visibleLogs, "\n")
 
-	case 1:
+	case 1: // Findings
 		noteList := notes.GetNotesList()
 		if len(noteList) == 0 {
 			rightView = "No findings/notes recorded yet."
 		} else {
 			var sb strings.Builder
+			renderer, _ := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(rightWidth-4),
+			)
+
 			for _, n := range noteList {
-				sb.WriteString(fmt.Sprintf("[ %s ] (%s) - %s\n", n.Title, n.Category, n.UpdatedAt))
-				contentLines := strings.Split(n.Content, "\n")
-				for i, line := range contentLines {
-					if i > 3 {
-						sb.WriteString("  ...\n")
-						break
-					}
-					sb.WriteString(fmt.Sprintf("  %s\n", line))
+				header := lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#22c55e")).
+					Render(fmt.Sprintf("[ %s ] (%s) - %s", n.Title, n.Category, n.UpdatedAt))
+				sb.WriteString(header + "\n")
+
+				content, err := renderer.Render(n.Content)
+				if err == nil {
+					sb.WriteString(content)
+				} else {
+					sb.WriteString(n.Content + "\n")
 				}
 				sb.WriteString("\n")
 			}
 
-			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
-			wrappedLines := strings.Split(wrapped, "\n")
+			// We don't use lipgloss.Render(sb.String()) here because glamour already handled wrapping and ANSI.
+			// We just need to split into lines for scrolling.
+			wrappedLines := strings.Split(sb.String(), "\n")
 
-			if m.rightScrollOffsets[1] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
-				m.rightScrollOffsets[1] = len(wrappedLines) - 1
-			}
-			if m.rightScrollOffsets[1] < 0 {
-				m.rightScrollOffsets[1] = 0
-			}
+		maxOffset := len(wrappedLines) - rightContentHeight
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if m.rightScrollOffsets[1] > maxOffset {
+			m.rightScrollOffsets[1] = maxOffset
+		}
+		if m.rightScrollOffsets[1] < 0 {
+			m.rightScrollOffsets[1] = 0
+		}
 
 			visibleLines := wrappedLines
 			if len(wrappedLines) > m.rightScrollOffsets[1] {
 				visibleLines = wrappedLines[m.rightScrollOffsets[1]:]
-			}
-			if len(visibleLines) > rightContentHeight {
-				visibleLines = visibleLines[:rightContentHeight]
-			}
-			rightView = strings.Join(visibleLines, "\n")
-		}
-	case 2:
-		todoList := todo.GetTodoList()
-		if len(todoList) == 0 {
-			rightView = "No tasks listed in todo queue."
-		} else {
-			var sb strings.Builder
-			for _, t := range todoList {
-				statusBox := "[ ]"
-				switch t.Status {
-				case "done":
-					statusBox = "[x]"
-				case "in_progress":
-					statusBox = "[/]"
-				}
-				sb.WriteString(fmt.Sprintf("%s %s (%s)\n", statusBox, t.Title, t.Priority))
-				if t.Description != "" {
-					sb.WriteString(fmt.Sprintf("    %s\n", t.Description))
-				}
-			}
-
-			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
-			wrappedLines := strings.Split(wrapped, "\n")
-
-			if m.rightScrollOffsets[2] > len(wrappedLines)-1 && len(wrappedLines) > 0 {
-				m.rightScrollOffsets[2] = len(wrappedLines) - 1
-			}
-			if m.rightScrollOffsets[2] < 0 {
-				m.rightScrollOffsets[2] = 0
-			}
-
-			visibleLines := wrappedLines
-			if len(wrappedLines) > m.rightScrollOffsets[2] {
-				visibleLines = wrappedLines[m.rightScrollOffsets[2]:]
 			}
 			if len(visibleLines) > rightContentHeight {
 				visibleLines = visibleLines[:rightContentHeight]
@@ -356,20 +410,24 @@ func (m model) View() string {
 	if m.activeTab == 0 && m.tailLogs {
 		rightTitleText += " (Tailing)"
 	}
-	rightContent := fmt.Sprintf("%s\n%s", titleStyle.Render(rightTitleText), rightView)
+	rightContent := fmt.Sprintf("%s\n%s", activeTitleStyle.Render(rightTitleText), rightView)
 	rightBox := rightBoxStyle.Render(rightContent)
 
 	mainLayout := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 
 	// Footer
+	footerSeparator := lipgloss.NewStyle().
+		Foreground(inactiveColor).
+		Render(strings.Repeat("─", m.width))
+
 	footerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#737373")).
+		Foreground(lipgloss.Color("#a3a3a3")).
 		Width(m.width).
 		MaxHeight(1)
-	footerText := " Tab: Toggle focus | Arrows/JK: Scroll/Tabs | 1,2,3: Tabs | T: Tail Logs | Q: Quit"
+	footerText := " Tab: Cycle focus | Arrows/JK: Scroll | 1,2: Tabs | T: Tail Logs | Q: Quit"
 	footer := footerStyle.Render(truncateString(footerText, m.width))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, tabRow, mainLayout, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, tabRow, mainLayout, footerSeparator, footer)
 }
 
 func formatDuration(d time.Duration) string {
@@ -382,9 +440,6 @@ func formatDuration(d time.Duration) string {
 }
 
 func buildTreeString(id string, indent string, isLast bool) string {
-	// Root call takes the lock once and passes it down via a helper or we just rely on recursion
-	// but the current implementation takes/releases lock for every node.
-	// Let's wrap it.
 	agents_graph.GraphLock.RLock()
 	defer agents_graph.GraphLock.RUnlock()
 	return buildTreeStringRecursive(id, indent, isLast, 0)
@@ -458,16 +513,15 @@ func truncateString(s string, maxLen int) string {
 // RunTUI runs the Strix scan within a background goroutine and monitors it using Bubble Tea.
 func RunTUI(ctx context.Context, target, scanMode, runDir string, handler *StrixLogHandler, scanFunc func() error) error {
 	m := model{
-		target:      target,
-		scanMode:    scanMode,
-		logHandler:  handler,
-		startTime:   time.Now(),
-		scanRunning: true,
-		focusLeft:   true,
-		tailLogs:    true,
+		target:       target,
+		scanMode:     scanMode,
+		logHandler:   handler,
+		startTime:    time.Now(),
+		scanRunning:  true,
+		focusSection: focusRight,
+		tailLogs:     true,
 	}
 
-	// Trigger scanning function asynchronously
 	go func() {
 		err := scanFunc()
 		if err != nil {

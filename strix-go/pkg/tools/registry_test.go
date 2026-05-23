@@ -208,3 +208,126 @@ func TestSanitizeForXMLParsingDropsExamples(t *testing.T) {
 		t.Errorf("expected empty examples element, got: %s", out)
 	}
 }
+
+func TestToolDefinitionIsAvailableInContext(t *testing.T) {
+	tests := []struct {
+		name         string
+		sandboxExec  bool
+		context      ExecutionContext
+		expectAvail  bool
+	}{
+		{"sandbox tool in sandbox context", true, ExecutionContextSandbox, true},
+		{"sandbox tool in parent context", true, ExecutionContextParent, true},
+		{"parent tool in sandbox context", false, ExecutionContextSandbox, false},
+		{"parent tool in parent context", false, ExecutionContextParent, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			def := ToolDefinition{
+				Name:             "test_tool",
+				SandboxExecution: tc.sandboxExec,
+			}
+			available := def.IsAvailableInContext(tc.context)
+			if available != tc.expectAvail {
+				t.Errorf("IsAvailableInContext(%s) = %v, want %v",
+					tc.context, available, tc.expectAvail)
+			}
+		})
+	}
+}
+
+func TestGetToolsPromptForContext(t *testing.T) {
+	// Clear and set up test registry
+	toolRegistry = make(map[string]ToolDefinition)
+	toolRegistry["sandbox_tool"] = ToolDefinition{
+		Name:             "sandbox_tool",
+		SandboxExecution: true,
+		XML:              `<tool name="sandbox_tool"><description>A sandbox tool</description></tool>`,
+	}
+	toolRegistry["parent_tool"] = ToolDefinition{
+		Name:             "parent_tool",
+		SandboxExecution: false,
+		XML:              `<tool name="parent_tool"><description>A parent tool</description></tool>`,
+	}
+
+	// Test parent context includes all tools
+	parentPrompt := GetToolsPromptForContext(ExecutionContextParent)
+	if !strings.Contains(parentPrompt, "sandbox_tool") {
+		t.Errorf("parent context should include sandbox_tool")
+	}
+	if !strings.Contains(parentPrompt, "parent_tool") {
+		t.Errorf("parent context should include parent_tool")
+	}
+
+	// Test sandbox context only includes sandbox tools
+	sandboxPrompt := GetToolsPromptForContext(ExecutionContextSandbox)
+	if !strings.Contains(sandboxPrompt, "sandbox_tool") {
+		t.Errorf("sandbox context should include sandbox_tool")
+	}
+	if strings.Contains(sandboxPrompt, "parent_tool") {
+		t.Errorf("sandbox context should NOT include parent_tool")
+	}
+}
+
+func TestGetAvailableTools(t *testing.T) {
+	// Clear and set up test registry
+	toolRegistry = make(map[string]ToolDefinition)
+	toolRegistry["sandbox_tool"] = ToolDefinition{
+		Name:             "sandbox_tool",
+		SandboxExecution: true,
+	}
+	toolRegistry["parent_tool"] = ToolDefinition{
+		Name:             "parent_tool",
+		SandboxExecution: false,
+	}
+
+	// Test sandbox context
+	sandboxTools := GetAvailableTools(ExecutionContextSandbox)
+	if len(sandboxTools) != 1 || sandboxTools[0] != "sandbox_tool" {
+		t.Errorf("sandbox context should only have sandbox_tool, got %v", sandboxTools)
+	}
+
+	// Test parent context
+	parentTools := GetAvailableTools(ExecutionContextParent)
+	if len(parentTools) != 2 {
+		t.Errorf("parent context should have 2 tools, got %d: %v", len(parentTools), parentTools)
+	}
+}
+
+func TestValidateToolCallInContext(t *testing.T) {
+	// Clear and set up test registry
+	toolRegistry = make(map[string]ToolDefinition)
+	toolRegistry["sandbox_tool"] = ToolDefinition{
+		Name:             "sandbox_tool",
+		SandboxExecution: true,
+	}
+	toolRegistry["parent_tool"] = ToolDefinition{
+		Name:             "parent_tool",
+		SandboxExecution: false,
+	}
+
+	tests := []struct {
+		name      string
+		toolName  string
+		context   ExecutionContext
+		wantError bool
+	}{
+		{"sandbox tool in sandbox", "sandbox_tool", ExecutionContextSandbox, false},
+		{"sandbox tool in parent", "sandbox_tool", ExecutionContextParent, false},
+		{"parent tool in parent", "parent_tool", ExecutionContextParent, false},
+		{"parent tool in sandbox", "parent_tool", ExecutionContextSandbox, true},
+		{"nonexistent tool", "nonexistent", ExecutionContextParent, true},
+		{"nonexistent tool in sandbox", "nonexistent", ExecutionContextSandbox, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateToolCallInContext(tc.toolName, tc.context)
+			if (err != nil) != tc.wantError {
+				t.Errorf("ValidateToolCallInContext(%q, %s) error = %v, wantError %v",
+					tc.toolName, tc.context, err, tc.wantError)
+			}
+		})
+	}
+}

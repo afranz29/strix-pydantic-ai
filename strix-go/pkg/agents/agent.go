@@ -15,19 +15,21 @@ import (
 )
 
 type Agent struct {
-	ID            string
-	Name          string
-	Task          string
-	Skills        []string
-	History       []llm.Message
-	Sandbox       *runtime.SandboxInfo
-	SandboxClient *runtime.SandboxClient
-	LLM           *llm.LLMClient
-	MaxIterations int
-	Iteration     int
-	ScanMode      string
-	Interactive   bool
-	SystemContext map[string]interface{}
+	ID               string
+	Name             string
+	Task             string
+	Skills           []string
+	History          []llm.Message
+	Sandbox          *runtime.SandboxInfo
+	SandboxClient    *runtime.SandboxClient
+	LLM              *llm.LLMClient
+	MaxIterations    int
+	Iteration        int
+	ScanMode         string
+	Interactive      bool
+	SystemContext    map[string]interface{}
+	ExecutionContext tools.ExecutionContext
+	AvailableTools   []string
 }
 
 type RunConfig struct {
@@ -149,16 +151,18 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 	history = append(history, llm.Message{Role: "user", Content: fmt.Sprintf("Your core task is: %s", task)})
 
 	agent := &Agent{
-		ID:            childID,
-		Name:          childName,
-		Task:          task,
-		Skills:        skills,
-		LLM:           llmClient,
-		MaxIterations: 300,
-		History:       history,
-		ScanMode:      cfg.ScanMode,
-		Interactive:   cfg.Interactive,
-		SystemContext: cfg.SystemPromptContext,
+		ID:               childID,
+		Name:             childName,
+		Task:             task,
+		Skills:           skills,
+		LLM:              llmClient,
+		MaxIterations:    300,
+		History:          history,
+		ScanMode:         cfg.ScanMode,
+		Interactive:      cfg.Interactive,
+		SystemContext:    cfg.SystemPromptContext,
+		ExecutionContext: tools.ExecutionContextParent, // Will be updated if sandbox is available
+		AvailableTools:   tools.GetAvailableTools(tools.ExecutionContextParent),
 	}
 
 	// 1. Resolve Sandbox association: reuse parent's sandbox or create a new one
@@ -193,6 +197,17 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 		}
 
 		agent.Sandbox = sandbox
+	}
+
+	// Update execution context and available tools based on sandbox availability
+	if agent.Sandbox != nil {
+		agent.ExecutionContext = tools.ExecutionContextSandbox
+		agent.AvailableTools = tools.GetAvailableTools(tools.ExecutionContextSandbox)
+		slog.Info("Agent execution context set",
+			slog.String("agent_id", childID),
+			slog.String("context", string(agent.ExecutionContext)),
+			slog.Any("available_tools", agent.AvailableTools),
+		)
 	}
 
 	// Register sandbox state in the agents graph registry for sharing
@@ -249,7 +264,14 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		// 1. Render system prompt containing XML schemas and skills Markdown
-		systemPrompt, err := llm.CompileSystemPrompt("StrixAgent", a.Skills, a.ScanMode, a.Interactive, a.SystemContext)
+		systemPrompt, err := llm.CompileSystemPromptWithContext(
+			"StrixAgent",
+			a.Skills,
+			a.ScanMode,
+			a.Interactive,
+			a.SystemContext,
+			a.ExecutionContext,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to compile system prompt: %w", err)
 		}
@@ -328,6 +350,24 @@ func (a *Agent) Run(ctx context.Context) error {
 					slog.String("tool_name", call.ToolName),
 				)
 				obs := fmt.Sprintf("<observation>\nError: Tool '%s' is not registered in the system.\n</observation>", call.ToolName)
+				a.History = append(a.History, llm.Message{Role: "user", Content: obs})
+				continue
+			}
+
+			// Validate tool is available in this execution context
+			if err := tools.ValidateToolCallInContext(call.ToolName, a.ExecutionContext); err != nil {
+				slog.Warn("Tool not available in execution context",
+					slog.String("agent_id", a.ID),
+					slog.String("tool_name", call.ToolName),
+					slog.String("context", string(a.ExecutionContext)),
+					slog.Any("error", err),
+				)
+				obs := fmt.Sprintf(
+					"<observation>\nError: %s\n\nAvailable tools in %s context: %v\n</observation>",
+					err.Error(),
+					a.ExecutionContext,
+					a.AvailableTools,
+				)
 				a.History = append(a.History, llm.Message{Role: "user", Content: obs})
 				continue
 			}

@@ -671,7 +671,10 @@ func sortTodos(list []*Todo) {
 		if leftPriority != rightPriority {
 			return leftPriority < rightPriority
 		}
-		return left.CreatedAt < right.CreatedAt
+		if left.CreatedAt != right.CreatedAt {
+			return left.CreatedAt < right.CreatedAt
+		}
+		return left.TodoID < right.TodoID
 	})
 }
 

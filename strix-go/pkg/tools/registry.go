@@ -35,12 +35,34 @@ type XMLTools struct {
 	Tools   []XMLTool `xml:"tool"`
 }
 
+// ExecutionContext defines where a tool runs
+type ExecutionContext string
+
+const (
+	ExecutionContextSandbox ExecutionContext = "sandbox"
+	ExecutionContextParent  ExecutionContext = "parent"
+)
+
 type ToolDefinition struct {
 	Name             string
 	SandboxExecution bool
 	Handler          interface{} // Go function for local tools
 	XML              string      // Raw XML snippet for system prompt injection
 	Parsed           XMLTool
+}
+
+// IsAvailableInContext returns true if this tool can be executed in the given context
+func (td ToolDefinition) IsAvailableInContext(ctx ExecutionContext) bool {
+	switch ctx {
+	case ExecutionContextSandbox:
+		// Only tools marked with sandbox_execution=true are available in sandbox
+		return td.SandboxExecution
+	case ExecutionContextParent:
+		// All tools available to parent
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -329,17 +351,99 @@ func splitAndTrim(value string, sep string) []interface{} {
 	return result
 }
 
+// GetToolsPrompt returns all tool schemas (legacy, for parent execution)
+// Deprecated: Use GetToolsPromptForContext instead
 func GetToolsPrompt() string {
+	return GetToolsPromptForContext(ExecutionContextParent)
+}
+
+// GetToolsPromptForContext returns tool schemas filtered by execution context
+func GetToolsPromptForContext(ctx ExecutionContext) string {
 	registryLock.RLock()
 	defer registryLock.RUnlock()
 
 	var prompt string
 	prompt += "<tools>\n"
-	for _, def := range toolRegistry {
+
+	// Sort tools by name for consistent output
+	var toolNames []string
+	for name := range toolRegistry {
+		toolNames = append(toolNames, name)
+	}
+	// Simple sort for determinism
+	for i := 0; i < len(toolNames)-1; i++ {
+		for j := i + 1; j < len(toolNames); j++ {
+			if toolNames[j] < toolNames[i] {
+				toolNames[i], toolNames[j] = toolNames[j], toolNames[i]
+			}
+		}
+	}
+
+	// Include only tools available in this context
+	for _, name := range toolNames {
+		def := toolRegistry[name]
+		if !def.IsAvailableInContext(ctx) {
+			continue
+		}
 		if def.XML != "" {
 			prompt += "  " + def.XML + "\n"
 		}
 	}
 	prompt += "</tools>"
 	return prompt
+}
+
+// GetAvailableTools returns a list of tool names available in the given context
+func GetAvailableTools(ctx ExecutionContext) []string {
+	registryLock.RLock()
+	defer registryLock.RUnlock()
+
+	var tools []string
+	for name, def := range toolRegistry {
+		if def.IsAvailableInContext(ctx) {
+			tools = append(tools, name)
+		}
+	}
+
+	// Sort for determinism
+	for i := 0; i < len(tools)-1; i++ {
+		for j := i + 1; j < len(tools); j++ {
+			if tools[j] < tools[i] {
+				tools[i], tools[j] = tools[j], tools[i]
+			}
+		}
+	}
+
+	return tools
+}
+
+// ValidateToolCallInContext checks if a tool can be executed in the given context
+// Returns error if tool doesn't exist or isn't available in context
+func ValidateToolCallInContext(toolName string, ctx ExecutionContext) error {
+	registryLock.RLock()
+	defer registryLock.RUnlock()
+
+	def, exists := toolRegistry[toolName]
+	if !exists {
+		availableTools := make([]string, 0, len(toolRegistry))
+		for name := range toolRegistry {
+			availableTools = append(availableTools, name)
+		}
+		return fmt.Errorf("tool '%s' does not exist (available tools: %v)", toolName, availableTools)
+	}
+
+	if !def.IsAvailableInContext(ctx) {
+		available := make([]string, 0)
+		for name, tool := range toolRegistry {
+			if tool.IsAvailableInContext(ctx) {
+				available = append(available, name)
+			}
+		}
+		return fmt.Errorf(
+			"tool '%s' not available in %s context (available tools: %v)",
+			toolName, ctx, available,
+		)
+	}
+
+	return nil
 }
