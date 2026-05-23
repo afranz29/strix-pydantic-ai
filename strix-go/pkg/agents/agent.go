@@ -199,16 +199,10 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 		agent.Sandbox = sandbox
 	}
 
-	// Update execution context and available tools based on sandbox availability
-	if agent.Sandbox != nil {
-		agent.ExecutionContext = tools.ExecutionContextSandbox
-		agent.AvailableTools = tools.GetAvailableTools(tools.ExecutionContextSandbox)
-		slog.Info("Agent execution context set",
-			slog.String("agent_id", childID),
-			slog.String("context", string(agent.ExecutionContext)),
-			slog.Any("available_tools", agent.AvailableTools),
-		)
-	}
+	// Agents are orchestrators that run in parent context.
+	// The sandbox is a container for tools to execute in, not where the agent runs.
+	// All agents need parent context to spawn sub-agents, create tasks, etc.
+	// (This was already set correctly in SpawnAgent initialization)
 
 	// Register sandbox state in the agents graph registry for sharing
 	agents_graph.GraphLock.Lock()
@@ -350,24 +344,6 @@ func (a *Agent) Run(ctx context.Context) error {
 					slog.String("tool_name", call.ToolName),
 				)
 				obs := fmt.Sprintf("<observation>\nError: Tool '%s' is not registered in the system.\n</observation>", call.ToolName)
-				a.History = append(a.History, llm.Message{Role: "user", Content: obs})
-				continue
-			}
-
-			// Validate tool is available in this execution context
-			if err := tools.ValidateToolCallInContext(call.ToolName, a.ExecutionContext); err != nil {
-				slog.Warn("Tool not available in execution context",
-					slog.String("agent_id", a.ID),
-					slog.String("tool_name", call.ToolName),
-					slog.String("context", string(a.ExecutionContext)),
-					slog.Any("error", err),
-				)
-				obs := fmt.Sprintf(
-					"<observation>\nError: %s\n\nAvailable tools in %s context: %v\n</observation>",
-					err.Error(),
-					a.ExecutionContext,
-					a.AvailableTools,
-				)
 				a.History = append(a.History, llm.Message{Role: "user", Content: obs})
 				continue
 			}
