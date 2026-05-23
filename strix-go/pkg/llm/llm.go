@@ -25,7 +25,7 @@ type LLMClient struct {
 func NewLLMClient(ctx context.Context) (*LLMClient, error) {
 	model := os.Getenv("STRIX_LLM")
 	if model == "" {
-		model = "gemini-3.1-flash-lite" // Default to Gemini first
+		model = "gemini-3.5-flash" // Default to Gemini first
 	}
 
 	apiKey := os.Getenv("LLM_API_KEY")

@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := go-build
+
 .PHONY: help install dev-install format lint type-check test test-cov clean pre-commit setup-dev go-build go-test go-fmt go-lint
 
 help:

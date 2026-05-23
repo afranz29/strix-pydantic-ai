@@ -67,7 +67,13 @@ func (r *DockerRuntime) CreateSandbox(ctx context.Context, agentID string, local
 	}
 
 	scanID := fmt.Sprintf("scan-%s", agentID)
-	containerName := fmt.Sprintf("strix-scan-%s", scanID)
+	// Use a unique container name by including the run directory hash or timestamp
+	// For now, let's just make it unique by including a part of the WorkspaceID if available,
+	// but better to just use a timestamp or a unique ID from the context.
+	// Since agentID is just 'agent_root' for the root agent, we need more entropy.
+	
+	uniqueID := time.Now().Format("150405") // HHMMSS is usually enough for local collisions
+	containerName := fmt.Sprintf("strix-%s-%s", uniqueID, agentID)
 
 	slog.Info("Creating sandbox container",
 		slog.String("agent_id", agentID),

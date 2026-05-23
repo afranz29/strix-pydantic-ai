@@ -82,15 +82,45 @@ func loadSkillContent(skillName string) string {
 	return string(data)
 }
 
-func CompileSystemPrompt(agentName string, skillNames []string, systemPromptContext map[string]interface{}) (string, error) {
+func orderedSkills(skillNames []string, scanMode string) []string {
+	ordered := append([]string{}, skillNames...)
+	if scanMode != "" {
+		ordered = append(ordered, filepath.ToSlash(filepath.Join("scan_modes", scanMode)))
+	}
+
+	var deduped []string
+	seen := make(map[string]struct{}, len(ordered))
+	for _, skillName := range ordered {
+		if skillName == "" {
+			continue
+		}
+		if _, exists := seen[skillName]; exists {
+			continue
+		}
+		seen[skillName] = struct{}{}
+		deduped = append(deduped, skillName)
+	}
+
+	return deduped
+}
+
+func CompileSystemPrompt(
+	agentName string,
+	skillNames []string,
+	scanMode string,
+	interactive bool,
+	systemPromptContext map[string]interface{},
+) (string, error) {
 	templatePath := filepath.Join(AgentsDir, agentName, "system_prompt.jinja")
 	tpl, err := pongo2.FromFile(templatePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to load system prompt template: %w", err)
 	}
 
+	loadedSkillNames := orderedSkills(skillNames, scanMode)
 	ctx := pongo2.Context{
-		"loaded_skill_names": skillNames,
+		"interactive":        interactive,
+		"loaded_skill_names": loadedSkillNames,
 		"get_skill": func(name string) string {
 			return loadSkillContent(name)
 		},

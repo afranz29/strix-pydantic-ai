@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/usestrix/strix-go/pkg/llm"
 	"github.com/usestrix/strix-go/pkg/tools"
 )
 
@@ -24,17 +25,19 @@ type AgentMessage struct {
 }
 
 type AgentNode struct {
-	ID            string                 `json:"id"`
-	Name          string                 `json:"name"`
-	Task          string                 `json:"task"`
-	Status        string                 `json:"status"` // "running", "waiting", "finished", "failed"
-	ParentID      string                 `json:"parent_id"`
-	CreatedAt     time.Time              `json:"created_at"`
-	FinishedAt    time.Time              `json:"finished_at,omitempty"`
-	Result        map[string]interface{} `json:"result,omitempty"`
-	WaitingReason string                 `json:"waiting_reason,omitempty"`
-	Inbox         chan AgentMessage      `json:"-"`
-	Sandbox       interface{}            `json:"-"`
+	ID                  string                 `json:"id"`
+	Name                string                 `json:"name"`
+	Task                string                 `json:"task"`
+	Status              string                 `json:"status"` // "running", "waiting", "finished", "failed"
+	ParentID            string                 `json:"parent_id"`
+	CreatedAt           time.Time              `json:"created_at"`
+	FinishedAt          time.Time              `json:"finished_at,omitempty"`
+	Result              map[string]interface{} `json:"result,omitempty"`
+	WaitingReason       string                 `json:"waiting_reason,omitempty"`
+	Inbox               chan AgentMessage      `json:"-"`
+	Sandbox             interface{}            `json:"-"`
+	InitialHistory      []llm.Message          `json:"-"`
+	ConversationHistory []llm.Message          `json:"-"`
 }
 
 type GraphEdge struct {
@@ -75,6 +78,10 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	task, _ := args["task"].(string)
 	name, _ := args["name"].(string)
 	rawSkills, _ := args["skills"].(string)
+	inheritContext, ok := args["inherit_context"].(bool)
+	if !ok {
+		inheritContext = true
+	}
 
 	if strings.TrimSpace(task) == "" {
 		return map[string]interface{}{"success": false, "error": "Task description cannot be empty"}, nil
@@ -94,14 +101,22 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	}
 
 	childID := generateAgentID()
+	var initialHistory []llm.Message
+	if inheritContext && parentID != "" {
+		if parent, exists := AgentNodes[parentID]; exists && len(parent.ConversationHistory) > 0 {
+			initialHistory = cloneHistory(parent.ConversationHistory)
+		}
+	}
+
 	node := &AgentNode{
-		ID:        childID,
-		Name:      name,
-		Task:      task,
-		Status:    "running",
-		ParentID:  parentID,
-		CreatedAt: time.Now().UTC(),
-		Inbox:     make(chan AgentMessage, 100),
+		ID:             childID,
+		Name:           name,
+		Task:           task,
+		Status:         "running",
+		ParentID:       parentID,
+		CreatedAt:      time.Now().UTC(),
+		Inbox:          make(chan AgentMessage, 100),
+		InitialHistory: initialHistory,
 	}
 
 	AgentNodes[childID] = node
@@ -134,6 +149,12 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 		"success":  true,
 		"agent_id": childID,
 		"message":  fmt.Sprintf("Agent '%s' created and started asynchronously", name),
+		"agent_info": map[string]interface{}{
+			"id":        childID,
+			"name":      name,
+			"status":    "running",
+			"parent_id": parentID,
+		},
 	}, nil
 }
 
@@ -273,14 +294,27 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 
 	agentID, _ := args["agent_id"].(string)
 	summary, _ := args["result_summary"].(string)
+	findings := interfaceSliceToStrings(args["findings"])
+	finalRecommendations := interfaceSliceToStrings(args["final_recommendations"])
 	successVal, ok := args["success"].(bool)
 	if !ok {
 		successVal = true
+	}
+	reportToParent, ok := args["report_to_parent"].(bool)
+	if !ok {
+		reportToParent = true
 	}
 
 	node, exists := AgentNodes[agentID]
 	if !exists {
 		return map[string]interface{}{"agent_completed": false, "error": "Agent not found"}, nil
+	}
+	if node.ParentID == "" {
+		return map[string]interface{}{
+			"agent_completed": false,
+			"error":           "This tool can only be used by subagents. Root/main agents must use finish_scan instead.",
+			"parent_notified": false,
+		}, nil
 	}
 
 	node.Status = "finished"
@@ -289,8 +323,36 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 	}
 	node.FinishedAt = time.Now().UTC()
 	node.Result = map[string]interface{}{
-		"summary": strings.TrimSpace(summary),
-		"success": successVal,
+		"summary":         strings.TrimSpace(summary),
+		"findings":        findings,
+		"success":         successVal,
+		"recommendations": finalRecommendations,
+	}
+
+	parentNotified := false
+	if reportToParent && node.ParentID != "" {
+		if parentNode, exists := AgentNodes[node.ParentID]; exists {
+			messageID := fmt.Sprintf("report_%d", time.Now().UnixNano()/1e6%1000000)
+			reportMessage := formatCompletionReport(node, summary, findings, finalRecommendations, successVal)
+			message := AgentMessage{
+				ID:        messageID,
+				From:      agentID,
+				To:        node.ParentID,
+				Content:   reportMessage,
+				MsgType:   "information",
+				Priority:  "high",
+				Timestamp: time.Now().UTC(),
+			}
+
+			if enqueueMessageLocked(parentNode, message) {
+				GraphEdges = append(GraphEdges, GraphEdge{
+					From: agentID,
+					To:   node.ParentID,
+					Type: "message",
+				})
+				parentNotified = true
+			}
+		}
 	}
 
 	slog.Info("Agent execution finished",
@@ -301,7 +363,16 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 
 	return map[string]interface{}{
 		"agent_completed": true,
-		"success":         true,
+		"parent_notified": parentNotified,
+		"completion_summary": map[string]interface{}{
+			"agent_id":            agentID,
+			"agent_name":          node.Name,
+			"task":                node.Task,
+			"success":             successVal,
+			"findings_count":      len(findings),
+			"has_recommendations": len(finalRecommendations) > 0,
+			"finished_at":         node.FinishedAt,
+		},
 	}, nil
 }
 
@@ -363,4 +434,99 @@ func ViewAgentGraph(args map[string]interface{}) (interface{}, error) {
 			"total_agents": len(AgentNodes),
 		},
 	}, nil
+}
+
+func cloneHistory(history []llm.Message) []llm.Message {
+	if len(history) == 0 {
+		return nil
+	}
+
+	cloned := make([]llm.Message, len(history))
+	copy(cloned, history)
+	return cloned
+}
+
+func enqueueMessageLocked(targetNode *AgentNode, message AgentMessage) bool {
+	select {
+	case targetNode.Inbox <- message:
+		if targetNode.Status == "waiting" {
+			targetNode.Status = "running"
+		}
+		return true
+	default:
+		slog.Error("Graph of Agents: Agent inbox queue full, message dropped",
+			slog.String("message_id", message.ID),
+			slog.String("from", message.From),
+			slog.String("to", message.To),
+		)
+		return false
+	}
+}
+
+func interfaceSliceToStrings(raw interface{}) []string {
+	switch value := raw.(type) {
+	case []string:
+		cloned := make([]string, len(value))
+		copy(cloned, value)
+		return cloned
+	case []interface{}:
+		var result []string
+		for _, item := range value {
+			if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+				result = append(result, str)
+			}
+		}
+		return result
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		return []string{strings.TrimSpace(value)}
+	default:
+		return nil
+	}
+}
+
+func formatCompletionReport(
+	node *AgentNode,
+	summary string,
+	findings []string,
+	recommendations []string,
+	success bool,
+) string {
+	var findingsXML strings.Builder
+	for _, finding := range findings {
+		findingsXML.WriteString(fmt.Sprintf("        <finding>%s</finding>\n", finding))
+	}
+
+	var recommendationsXML strings.Builder
+	for _, recommendation := range recommendations {
+		recommendationsXML.WriteString(fmt.Sprintf("        <recommendation>%s</recommendation>\n", recommendation))
+	}
+
+	return fmt.Sprintf(`<agent_completion_report>
+    <agent_info>
+        <agent_name>%s</agent_name>
+        <agent_id>%s</agent_id>
+        <task>%s</task>
+        <status>%s</status>
+        <completion_time>%s</completion_time>
+    </agent_info>
+    <results>
+        <summary>%s</summary>
+        <findings>
+%s        </findings>
+        <recommendations>
+%s        </recommendations>
+    </results>
+</agent_completion_report>`,
+		node.Name,
+		node.ID,
+		node.Task,
+		map[bool]string{true: "SUCCESS", false: "FAILED"}[success],
+		node.FinishedAt.Format(time.RFC3339),
+		strings.TrimSpace(summary),
+		findingsXML.String(),
+		recommendationsXML.String(),
+	)
 }

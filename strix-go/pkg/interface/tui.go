@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,98 +14,13 @@ import (
 	"github.com/usestrix/strix-go/pkg/tools/todo"
 )
 
-// TUIHandler is a thread-safe custom slog handler that writes to a run log file
-// and maintains a memory buffer of logs for real-time visualization.
-type TUIHandler struct {
-	mu      sync.Mutex
-	logs    []string
-	logFile *os.File
-	parent  slog.Handler
-}
-
-func NewTUIHandler(logPath string) (*TUIHandler, error) {
-	var f *os.File
-	var parent slog.Handler
-	if logPath != "" {
-		var err error
-		f, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return nil, err
-		}
-		parent = slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})
-	}
-	return &TUIHandler{
-		logs:    make([]string, 0, 500),
-		logFile: f,
-		parent:  parent,
-	}, nil
-}
-
-func (h *TUIHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return true
-}
-
-func (h *TUIHandler) Handle(ctx context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.parent != nil {
-		_ = h.parent.Handle(ctx, r)
-	}
-
-	timeStr := r.Time.Format("15:04:05")
-	var levelStr string
-	switch r.Level {
-	case slog.LevelDebug:
-		levelStr = "DBG"
-	case slog.LevelInfo:
-		levelStr = "INF"
-	case slog.LevelWarn:
-		levelStr = "WRN"
-	case slog.LevelError:
-		levelStr = "ERR"
-	default:
-		levelStr = r.Level.String()
-	}
-
-	msg := fmt.Sprintf("[%s] %s: %s", timeStr, levelStr, r.Message)
-	r.Attrs(func(a slog.Attr) bool {
-		msg += fmt.Sprintf(" %s=%v", a.Key, a.Value.Any())
-		return true
-	})
-
-	h.logs = append(h.logs, msg)
-	if len(h.logs) > 500 {
-		h.logs = h.logs[1:]
-	}
-	return nil
-}
-
-func (h *TUIHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
-func (h *TUIHandler) WithGroup(name string) slog.Handler       { return h }
-
-func (h *TUIHandler) Close() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.logFile != nil {
-		_ = h.logFile.Close()
-	}
-}
-
-func (h *TUIHandler) GetLogs() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	copied := make([]string, len(h.logs))
-	copy(copied, h.logs)
-	return copied
-}
-
+// tickMsg is used for periodic TUI updates
 type tickMsg time.Time
 
 type model struct {
 	target      string
 	scanMode    string
-	logHandler  *TUIHandler
+	logHandler  *StrixLogHandler
 	startTime   time.Time
 	elapsed     time.Duration
 	activeTab   int // 0: Logs, 1: Findings, 2: Todo Checklist
@@ -186,6 +98,17 @@ func (m model) View() string {
 	activeBorderColor := lipgloss.Color("#22c55e")
 	inactiveBorderColor := lipgloss.Color("#15803d")
 
+	availableHeight := m.height - 7
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+
+	leftTotalWidth := m.width / 3
+	rightTotalWidth := m.width - leftTotalWidth
+
+	leftWidth := leftTotalWidth - 2
+	rightWidth := rightTotalWidth - 2
+
 	leftBorderColor := inactiveBorderColor
 	if m.focusLeft {
 		leftBorderColor = activeBorderColor
@@ -194,8 +117,9 @@ func (m model) View() string {
 	leftBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(leftBorderColor).
-		Width(m.width/3 - 2).
-		Height(m.height - 7)
+		Width(leftWidth).
+		Height(availableHeight).
+		MaxHeight(availableHeight)
 
 	rightBorderColor := inactiveBorderColor
 	if !m.focusLeft {
@@ -205,8 +129,9 @@ func (m model) View() string {
 	rightBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(rightBorderColor).
-		Width(2*m.width/3 - 2).
-		Height(m.height - 7)
+		Width(rightWidth).
+		Height(availableHeight).
+		MaxHeight(availableHeight)
 
 	// Header
 	headerStyle := lipgloss.NewStyle().
@@ -214,11 +139,12 @@ func (m model) View() string {
 		Foreground(lipgloss.Color("#ffffff")).
 		Background(lipgloss.Color("#15803d")).
 		Padding(0, 2).
-		Width(m.width)
+		Width(m.width).
+		MaxHeight(1)
 
 	headerText := fmt.Sprintf("STRIX ORCHESTRATOR | Target: %s | Mode: %s | Time: %s",
 		m.target, m.scanMode, formatDuration(m.elapsed))
-	header := headerStyle.Render(headerText)
+	header := headerStyle.Render(truncateString(headerText, m.width-4))
 
 	// Tabs
 	tabStyle := lipgloss.NewStyle().Padding(0, 2).Background(lipgloss.Color("#262626")).Foreground(lipgloss.Color("#a3a3a3"))
@@ -233,7 +159,7 @@ func (m model) View() string {
 			tabViews = append(tabViews, tabStyle.Render(t))
 		}
 	}
-	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, tabViews...)
+	tabRow := lipgloss.NewStyle().Width(m.width).MaxHeight(1).Render(lipgloss.JoinHorizontal(lipgloss.Top, tabViews...))
 
 	// Left panel: Agents Hierarchy tree
 	agents_graph.GraphLock.RLock()
@@ -248,22 +174,44 @@ func (m model) View() string {
 	}
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22c55e"))
+	
+	// Truncate/slice tree view to fit left box
+	treeLines := strings.Split(treeView, "\n")
+	// Inner height = availableHeight - 2 (borders) - 2 (title + newline)
+	treeLimit := availableHeight - 4
+	if treeLimit < 1 {
+		treeLimit = 1
+	}
+	if len(treeLines) > treeLimit {
+		treeLines = treeLines[:treeLimit]
+	}
+	treeView = strings.Join(treeLines, "\n")
+
 	leftContent := fmt.Sprintf("%s\n%s", titleStyle.Render("── Agents Graph ──"), treeView)
 	leftBox := leftBoxStyle.Render(leftContent)
 
 	// Right panel based on activeTab
 	var rightView string
+	rightContentHeight := availableHeight - 4
+	if rightContentHeight < 1 {
+		rightContentHeight = 1
+	}
+
 	switch m.activeTab {
 	case 0:
-		logs := m.logHandler.GetLogs()
-		maxLines := m.height - 10
-		if maxLines <= 0 {
-			maxLines = 1
+		logs := m.logHandler.GetTuiLogs()
+		
+		// Wrap logs and collect last lines
+		var wrappedLines []string
+		for _, log := range logs {
+			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(log)
+			wrappedLines = append(wrappedLines, strings.Split(wrapped, "\n")...)
 		}
-		if len(logs) > maxLines {
-			logs = logs[len(logs)-maxLines:]
+		
+		if len(wrappedLines) > rightContentHeight {
+			wrappedLines = wrappedLines[len(wrappedLines)-rightContentHeight:]
 		}
-		rightView = strings.Join(logs, "\n")
+		rightView = strings.Join(wrappedLines, "\n")
 	case 1:
 		noteList := notes.GetNotesList()
 		if len(noteList) == 0 {
@@ -282,7 +230,14 @@ func (m model) View() string {
 				}
 				sb.WriteString("\n")
 			}
-			rightView = sb.String()
+			
+			// Wrap and truncate (show first N lines for notes)
+			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
+			wrappedLines := strings.Split(wrapped, "\n")
+			if len(wrappedLines) > rightContentHeight {
+				wrappedLines = wrappedLines[:rightContentHeight]
+			}
+			rightView = strings.Join(wrappedLines, "\n")
 		}
 	case 2:
 		todoList := todo.GetTodoList()
@@ -303,7 +258,14 @@ func (m model) View() string {
 					sb.WriteString(fmt.Sprintf("    %s\n", t.Description))
 				}
 			}
-			rightView = sb.String()
+			
+			// Wrap and truncate (show first N lines for todos)
+			wrapped := lipgloss.NewStyle().Width(rightWidth).Render(sb.String())
+			wrappedLines := strings.Split(wrapped, "\n")
+			if len(wrappedLines) > rightContentHeight {
+				wrappedLines = wrappedLines[:rightContentHeight]
+			}
+			rightView = strings.Join(wrappedLines, "\n")
 		}
 	}
 
@@ -316,9 +278,10 @@ func (m model) View() string {
 	// Footer
 	footerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#737373")).
-		Width(m.width)
+		Width(m.width).
+		MaxHeight(1)
 	footerText := " Tab: Toggle focus | Arrow Keys: Switch panel/tabs | 1, 2, 3: Tabs | Q: Quit scan"
-	footer := footerStyle.Render(footerText)
+	footer := footerStyle.Render(truncateString(footerText, m.width))
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabRow, mainLayout, footer)
 }
@@ -388,18 +351,18 @@ func buildTreeString(id string, indent string, isLast bool) string {
 	return nodeLine
 }
 
-// RunTUI runs the Strix scan within a background goroutine and monitors it using Bubble Tea.
-func RunTUI(ctx context.Context, target, scanMode, runDir string, scanFunc func() error) error {
-	logPath := filepath.Join(runDir, "strix.log")
-	handler, err := NewTUIHandler(logPath)
-	if err != nil {
-		return err
+func truncateString(s string, maxLen int) string {
+	if lipgloss.Width(s) <= maxLen {
+		return s
 	}
-	defer handler.Close()
+	if maxLen < 3 {
+		return lipgloss.NewStyle().MaxWidth(maxLen).Render(s)
+	}
+	return lipgloss.NewStyle().MaxWidth(maxLen).Render(s)
+}
 
-	// Direct global slog through our custom handler
-	slog.SetDefault(slog.New(handler))
-
+// RunTUI runs the Strix scan within a background goroutine and monitors it using Bubble Tea.
+func RunTUI(ctx context.Context, target, scanMode, runDir string, handler *StrixLogHandler, scanFunc func() error) error {
 	m := model{
 		target:      target,
 		scanMode:    scanMode,

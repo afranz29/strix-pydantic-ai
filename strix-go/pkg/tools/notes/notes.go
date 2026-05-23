@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -148,7 +149,7 @@ func appendNoteEvent(op string, noteID string, note *Note) {
 	_, _ = f.Write(append(data, '\n'))
 }
 
-func ensureNotesLoaded() {
+func ensureNotesLoadedLocked() {
 	if RunDir == "" {
 		return
 	}
@@ -235,7 +236,7 @@ func CreateNote(args map[string]interface{}) (interface{}, error) {
 	notesLock.Lock()
 	defer notesLock.Unlock()
 
-	ensureNotesLoaded()
+	ensureNotesLoadedLocked()
 
 	title, _ := args["title"].(string)
 	content, _ := args["content"].(string)
@@ -244,14 +245,7 @@ func CreateNote(args map[string]interface{}) (interface{}, error) {
 		category = "general"
 	}
 
-	var tags []string
-	if rawTags, ok := args["tags"].([]interface{}); ok {
-		for _, t := range rawTags {
-			if str, ok := t.(string); ok {
-				tags = append(tags, str)
-			}
-		}
-	}
+	tags := normalizeTags(args["tags"])
 
 	if strings.TrimSpace(title) == "" {
 		return map[string]interface{}{"success": false, "error": "Title cannot be empty"}, nil
@@ -297,23 +291,16 @@ func CreateNote(args map[string]interface{}) (interface{}, error) {
 }
 
 func ListNotes(args map[string]interface{}) (interface{}, error) {
-	notesLock.RLock()
-	defer notesLock.RUnlock()
+	notesLock.Lock()
+	defer notesLock.Unlock()
 
-	ensureNotesLoaded()
+	ensureNotesLoadedLocked()
 
 	category, _ := args["category"].(string)
 	search, _ := args["search"].(string)
 	includeContent, _ := args["include_content"].(bool)
 
-	var filterTags []string
-	if rawTags, ok := args["tags"].([]interface{}); ok {
-		for _, t := range rawTags {
-			if str, ok := t.(string); ok {
-				filterTags = append(filterTags, str)
-			}
-		}
-	}
+	filterTags := normalizeTags(args["tags"])
 
 	var notesList []map[string]interface{}
 	for noteID, note := range notesStorage {
@@ -371,6 +358,11 @@ func ListNotes(args map[string]interface{}) (interface{}, error) {
 
 		notesList = append(notesList, entry)
 	}
+	sort.Slice(notesList, func(i, j int) bool {
+		left, _ := notesList[i]["created_at"].(string)
+		right, _ := notesList[j]["created_at"].(string)
+		return left > right
+	})
 
 	return map[string]interface{}{
 		"success":     true,
@@ -380,10 +372,10 @@ func ListNotes(args map[string]interface{}) (interface{}, error) {
 }
 
 func GetNote(args map[string]interface{}) (interface{}, error) {
-	notesLock.RLock()
-	defer notesLock.RUnlock()
+	notesLock.Lock()
+	defer notesLock.Unlock()
 
-	ensureNotesLoaded()
+	ensureNotesLoadedLocked()
 
 	noteID, _ := args["note_id"].(string)
 	if strings.TrimSpace(noteID) == "" {
@@ -405,7 +397,7 @@ func UpdateNote(args map[string]interface{}) (interface{}, error) {
 	notesLock.Lock()
 	defer notesLock.Unlock()
 
-	ensureNotesLoaded()
+	ensureNotesLoadedLocked()
 
 	noteID, _ := args["note_id"].(string)
 	if strings.TrimSpace(noteID) == "" {
@@ -434,14 +426,8 @@ func UpdateNote(args map[string]interface{}) (interface{}, error) {
 		note.Content = content
 	}
 
-	if rawTags, ok := args["tags"].([]interface{}); ok {
-		var tags []string
-		for _, t := range rawTags {
-			if str, ok := t.(string); ok {
-				tags = append(tags, str)
-			}
-		}
-		note.Tags = tags
+	if _, exists := args["tags"]; exists {
+		note.Tags = normalizeTags(args["tags"])
 	}
 
 	note.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -466,7 +452,7 @@ func DeleteNote(args map[string]interface{}) (interface{}, error) {
 	notesLock.Lock()
 	defer notesLock.Unlock()
 
-	ensureNotesLoaded()
+	ensureNotesLoadedLocked()
 
 	noteID, _ := args["note_id"].(string)
 	if strings.TrimSpace(noteID) == "" {
@@ -497,12 +483,49 @@ func DeleteNote(args map[string]interface{}) (interface{}, error) {
 }
 
 func GetNotesList() []*Note {
-	notesLock.RLock()
-	defer notesLock.RUnlock()
-	ensureNotesLoaded()
+	notesLock.Lock()
+	defer notesLock.Unlock()
+	ensureNotesLoadedLocked()
 	var list []*Note
 	for _, note := range notesStorage {
 		list = append(list, note)
 	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt > list[j].CreatedAt
+	})
 	return list
+}
+
+func normalizeTags(raw interface{}) []string {
+	switch value := raw.(type) {
+	case []string:
+		return append([]string{}, value...)
+	case []interface{}:
+		var tags []string
+		for _, item := range value {
+			if str, ok := item.(string); ok && strings.TrimSpace(str) != "" {
+				tags = append(tags, strings.TrimSpace(str))
+			}
+		}
+		return tags
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return nil
+		}
+		if strings.Contains(trimmed, ",") {
+			parts := strings.Split(trimmed, ",")
+			tags := make([]string, 0, len(parts))
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					tags = append(tags, part)
+				}
+			}
+			return tags
+		}
+		return []string{trimmed}
+	default:
+		return nil
+	}
 }
