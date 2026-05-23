@@ -8,13 +8,16 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/usestrix/strix-go/pkg/agents"
 	_interface "github.com/usestrix/strix-go/pkg/interface"
+	"github.com/usestrix/strix-go/pkg/runtime"
 	"github.com/usestrix/strix-go/pkg/tools"
 	"github.com/usestrix/strix-go/pkg/tools/agents_graph"
 	finishpkg "github.com/usestrix/strix-go/pkg/tools/finish"
@@ -171,7 +174,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	sanitizedTarget := strings.ReplaceAll(targets[0], ".", "-")
 	sanitizedTarget = strings.ReplaceAll(sanitizedTarget, "/", "-")
 	sanitizedTarget = strings.ReplaceAll(sanitizedTarget, ":", "-")
-	runName := fmt.Sprintf("run_%s_%d", sanitizedTarget, time.Now().Unix())
+	runName := fmt.Sprintf("%d_run_%s", time.Now().Unix(), sanitizedTarget)
 	runDir := filepath.Join(baseDir, runName)
 	err = os.MkdirAll(runDir, 0755)
 	if err != nil {
@@ -283,26 +286,80 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 	agents_graph.GraphLock.Unlock()
 
-	ctx := context.Background()
+	// Setup signal handling for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Cleanup function to destroy all sandboxes
+	cleanup := func() {
+		slog.Info("Shutting down - cleaning up sandboxes...")
+		docker, err := runtime.NewDockerRuntime()
+		if err != nil {
+			slog.Error("Failed to create Docker client for cleanup", slog.Any("error", err))
+			return
+		}
+
+		agents_graph.GraphLock.Lock()
+		defer agents_graph.GraphLock.Unlock()
+
+		for _, node := range agents_graph.AgentNodes {
+			if node.Sandbox != nil {
+				if sandbox, ok := node.Sandbox.(*runtime.SandboxInfo); ok {
+					slog.Info("Destroying sandbox container",
+						slog.String("agent_id", node.ID),
+						slog.String("container_id", sandbox.WorkspaceID))
+					_ = docker.DestroySandbox(context.Background(), sandbox.WorkspaceID)
+				}
+			}
+		}
+	}
+	defer cleanup()
+
+	// Listen for interrupt signal in goroutine
+	exitChan := make(chan struct{})
+	go func() {
+		<-sigChan
+		slog.Info("Received interrupt signal, initiating graceful shutdown...")
+		cancel()
+		close(exitChan)
+	}()
+
 	scanFunc := func() error {
 		return agents.SpawnAgent(ctx, "", rootID, "Root Agent", taskDescription, []string{"root_agent"})
 	}
 
-	if nonInteractive {
-		err = scanFunc()
-		if err != nil {
-			return fmt.Errorf("root agent execution failed: %w", err)
+	// Run scan and handle interrupts
+	scanErr := make(chan error, 1)
+	go func() {
+		if nonInteractive {
+			err := scanFunc()
+			if err != nil {
+				scanErr <- fmt.Errorf("root agent execution failed: %w", err)
+				return
+			}
+			slog.Info("STRIX Penetration Test Completed Successfully.")
+			scanErr <- nil
+		} else {
+			// Interactive TUI mode
+			slog.Info("Starting TUI...")
+			err := _interface.RunTUI(ctx, targets[0], scanMode, runDir, handler, scanFunc)
+			if err != nil {
+				scanErr <- fmt.Errorf("TUI execution failed: %w", err)
+				return
+			}
+			scanErr <- nil
 		}
-		slog.Info("STRIX Penetration Test Completed Successfully.")
+	}()
+
+	// Wait for either scan completion or interrupt signal
+	select {
+	case err := <-scanErr:
+		return err
+	case <-exitChan:
+		slog.Info("Scan interrupted by user")
 		return nil
 	}
-
-	// Interactive TUI mode
-	slog.Info("Starting TUI...")
-	err = _interface.RunTUI(ctx, targets[0], scanMode, runDir, handler, scanFunc)
-	if err != nil {
-		return fmt.Errorf("TUI execution failed: %w", err)
-	}
-
-	return nil
 }
