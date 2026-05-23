@@ -19,6 +19,7 @@ import (
 	"github.com/usestrix/strix-go/pkg/tools/agents_graph"
 	finishpkg "github.com/usestrix/strix-go/pkg/tools/finish"
 	"github.com/usestrix/strix-go/pkg/tools/notes"
+	"github.com/usestrix/strix-go/pkg/tools/reporting"
 	"github.com/usestrix/strix-go/pkg/tools/thinking"
 	"github.com/usestrix/strix-go/pkg/tools/todo"
 )
@@ -178,6 +179,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 	notes.RunDir = runDir
 	todo.RunDir = runDir
+	reporting.RunDir = runDir
 	finishpkg.RunDir = runDir
 
 	// 2. Initialize slog to write to shared log files in baseDir
@@ -202,6 +204,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// 3. Initialize Orchestrator and Registries
 	agents.InitOrchestrator()
 	notes.RegisterNotesTools()
+	reporting.RegisterReportingTools()
 	todo.RegisterTodoTools()
 	thinking.RegisterThinkingTools()
 	agents_graph.RegisterAgentsGraphTools()

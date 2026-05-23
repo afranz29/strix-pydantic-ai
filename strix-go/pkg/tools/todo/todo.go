@@ -525,6 +525,21 @@ func DeleteTodo(args map[string]interface{}) (interface{}, error) {
 	}, nil
 }
 
+// MarkTodoDoneByID marks a todo as done by its ID and creator agent ID
+// Used for automatic todo completion when an agent finishes successfully
+func MarkTodoDoneByID(creatorAgentID, todoID string) {
+	todosLock.Lock()
+	defer todosLock.Unlock()
+
+	agentTodos := getAgentTodos(creatorAgentID)
+	if todoItem, exists := agentTodos[todoID]; exists {
+		todoItem.Status = "done"
+		todoItem.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		appendTodoEvent("update", creatorAgentID, todoID, todoItem)
+		slog.Debug("Todo auto-marked as done", slog.String("agent_id", creatorAgentID), slog.String("todo_id", todoID))
+	}
+}
+
 func GetTodoList() []*Todo {
 	todosLock.RLock()
 	defer todosLock.RUnlock()

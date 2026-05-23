@@ -12,6 +12,7 @@ import (
 
 	"github.com/usestrix/strix-go/pkg/llm"
 	"github.com/usestrix/strix-go/pkg/tools"
+	"github.com/usestrix/strix-go/pkg/tools/todo"
 )
 
 type AgentMessage struct {
@@ -34,6 +35,8 @@ type AgentNode struct {
 	FinishedAt          time.Time              `json:"finished_at,omitempty"`
 	Result              map[string]interface{} `json:"result,omitempty"`
 	WaitingReason       string                 `json:"waiting_reason,omitempty"`
+	TodoID              string                 `json:"todo_id,omitempty"`
+	TodoCreatorID       string                 `json:"todo_creator_id,omitempty"`
 	Inbox               chan AgentMessage      `json:"-"`
 	Sandbox             interface{}            `json:"-"`
 	InitialHistory      []llm.Message          `json:"-"`
@@ -78,6 +81,7 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	task, _ := args["task"].(string)
 	name, _ := args["name"].(string)
 	rawSkills, _ := args["skills"].(string)
+	todoID, _ := args["todo_id"].(string)
 	inheritContext, ok := args["inherit_context"].(bool)
 	if !ok {
 		inheritContext = true
@@ -88,6 +92,33 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	}
 	if strings.TrimSpace(name) == "" {
 		return map[string]interface{}{"success": false, "error": "Agent name cannot be empty"}, nil
+	}
+
+	// **Check A: Idempotency check** — ensure no matching agent is already running or completed
+	for existingID, existingNode := range AgentNodes {
+		if existingNode.ParentID == parentID && existingNode.Task == task {
+			// Check if agent is in a non-terminal state
+			if existingNode.Status == "running" || existingNode.Status == "waiting" || existingNode.Status == "finished" {
+				return map[string]interface{}{
+					"success": false,
+					"error":   fmt.Sprintf("An agent with this task is already running or completed (id=%s). Use wait_for_message or view_agent_graph to check its status.", existingID),
+				}, nil
+			}
+		}
+	}
+
+	// **Check B: Retry limit** — cap total attempts at 2
+	var totalAttempts int
+	for _, existingNode := range AgentNodes {
+		if existingNode.ParentID == parentID && existingNode.Task == task {
+			totalAttempts++
+		}
+	}
+	if totalAttempts >= 2 {
+		return map[string]interface{}{
+			"success": false,
+			"error":   "Maximum retry attempts (2) reached for this task. Do not spawn more agents. Review the previous agent's findings via view_agent_graph and report what was found.",
+		}, nil
 	}
 
 	var skills []string
@@ -115,6 +146,8 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 		Status:         "running",
 		ParentID:       parentID,
 		CreatedAt:      time.Now().UTC(),
+		TodoID:         todoID,
+		TodoCreatorID:  parentID, // Parent is the creator of the todo
 		Inbox:          make(chan AgentMessage, 100),
 		InitialHistory: initialHistory,
 	}
@@ -327,6 +360,11 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 		"findings":        findings,
 		"success":         successVal,
 		"recommendations": finalRecommendations,
+	}
+
+	// Auto-mark todo as done if this agent finished successfully and has a todo_id
+	if successVal && node.TodoID != "" && node.TodoCreatorID != "" {
+		todo.MarkTodoDoneByID(node.TodoCreatorID, node.TodoID)
 	}
 
 	parentNotified := false
