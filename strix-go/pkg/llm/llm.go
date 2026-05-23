@@ -30,6 +30,44 @@ func NewLLMClient(ctx context.Context) (*LLMClient, error) {
 
 	apiKey := os.Getenv("LLM_API_KEY")
 
+	// Determine if it is a Bedrock model
+	isBedrock := strings.HasPrefix(model, "bedrock/")
+
+	if isBedrock {
+		// Read environment variables
+		region := os.Getenv("AWS_REGION")
+		bearerToken := os.Getenv("AWS_BEARER_TOKEN_BEDROCK")
+
+		// Validate required environment variables
+		if region == "" {
+			return nil, fmt.Errorf("AWS_REGION environment variable is required for Bedrock models")
+		}
+		if bearerToken == "" {
+			return nil, fmt.Errorf("AWS_BEARER_TOKEN_BEDROCK environment variable is required for Bedrock models")
+		}
+
+		// Extract model ID by removing bedrock/ prefix
+		modelID := strings.TrimPrefix(model, "bedrock/")
+		if modelID == "" {
+			return nil, fmt.Errorf("invalid Bedrock model format: model ID cannot be empty after 'bedrock/' prefix")
+		}
+
+		slog.Info("Initializing Bedrock client",
+			slog.String("model", modelID),
+			slog.String("region", region),
+		)
+
+		cli, err := NewBedrockLLM(ctx, region, modelID, bearerToken)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Bedrock client: %w", err)
+		}
+
+		return &LLMClient{
+			llm:       cli,
+			modelName: modelID,
+		}, nil
+	}
+
 	// Determine if it is a Gemini/Google model
 	isGemini := strings.Contains(strings.ToLower(model), "gemini") ||
 		strings.HasPrefix(model, "googleai/") ||
