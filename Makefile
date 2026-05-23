@@ -1,21 +1,27 @@
-.PHONY: help install dev-install format lint type-check test test-cov clean pre-commit setup-dev
+.PHONY: help install dev-install format lint type-check test test-cov clean pre-commit setup-dev go-build go-test go-fmt go-lint
 
 help:
-	@echo "Available commands:"
+	@echo "Available commands (Python):"
 	@echo "  setup-dev     - Install all development dependencies and setup pre-commit"
 	@echo "  install       - Install production dependencies"
 	@echo "  dev-install   - Install development dependencies"
 	@echo ""
-	@echo "Code Quality:"
+	@echo "Code Quality (Python):"
 	@echo "  format        - Format code with ruff"
 	@echo "  lint          - Lint code with ruff and pylint"
 	@echo "  type-check    - Run type checking with mypy and pyright"
 	@echo "  security      - Run security checks with bandit"
 	@echo "  check-all     - Run all code quality checks"
 	@echo ""
-	@echo "Testing:"
+	@echo "Testing (Python):"
 	@echo "  test          - Run tests with pytest"
 	@echo "  test-cov      - Run tests with coverage reporting"
+	@echo ""
+	@echo "Go Rewrite (strix-go):"
+	@echo "  go-build      - Build Go binary (strix-go/bin/strix)"
+	@echo "  go-test       - Run Go tests"
+	@echo "  go-fmt        - Format Go codebase"
+	@echo "  go-lint       - Lint Go codebase (go vet)"
 	@echo ""
 	@echo "Development:"
 	@echo "  pre-commit    - Run pre-commit hooks on all files"
@@ -70,13 +76,34 @@ test-cov:
 	@echo "✅ Tests with coverage complete!"
 	@echo "📊 Coverage report generated in htmlcov/"
 
+go-build:
+	@echo "🏗️ Building Go binary..."
+	mkdir -p strix-go/bin
+	cd strix-go && go build -o bin/strix ./cmd/strix
+	@echo "✅ Go binary built at strix-go/bin/strix"
+
+go-test:
+	@echo "🧪 Running Go tests..."
+	cd strix-go && go test -v ./...
+	@echo "✅ Go tests complete!"
+
+go-fmt:
+	@echo "🎨 Formatting Go code..."
+	cd strix-go && go fmt ./...
+	@echo "✅ Go code formatting complete!"
+
+go-lint:
+	@echo "🔍 Vetting Go code..."
+	cd strix-go && go vet ./...
+	@echo "✅ Go vetting complete!"
+
 pre-commit:
 	@echo "🔧 Running pre-commit hooks..."
 	uv run pre-commit run --all-files
 	@echo "✅ Pre-commit hooks complete!"
 
 clean:
-	@echo "🧹 Cleaning up cache files..."
+	@echo "🧹 Cleaning up cache files and Go binaries..."
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".mypy_cache" -exec rm -rf {} + 2>/dev/null || true
@@ -84,6 +111,7 @@ clean:
 	find . -type d -name "htmlcov" -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
 	find . -name ".coverage" -delete 2>/dev/null || true
+	rm -rf strix-go/bin
 	@echo "✅ Cleanup complete!"
 
 dev: format lint type-check test

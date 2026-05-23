@@ -97,3 +97,10 @@ Thumbs.db
 schema.graphql
 
 .opencode/
+
+# Go
+strix-go/bin/
+strix-go/strix
+
+# Antigravity CLI
+.antigravitycli/
