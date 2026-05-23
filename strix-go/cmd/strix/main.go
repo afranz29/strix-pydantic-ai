@@ -161,12 +161,18 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 
 	// 1. Resolve run directory first so we can redirect logging to it
+	baseDir := "strix_go_runs"
+	err := os.MkdirAll(baseDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create base directory: %w", err)
+	}
+
 	sanitizedTarget := strings.ReplaceAll(targets[0], ".", "-")
 	sanitizedTarget = strings.ReplaceAll(sanitizedTarget, "/", "-")
 	sanitizedTarget = strings.ReplaceAll(sanitizedTarget, ":", "-")
 	runName := fmt.Sprintf("run_%s_%d", sanitizedTarget, time.Now().Unix())
-	runDir := filepath.Join("strix_runs", runName)
-	err := os.MkdirAll(runDir, 0755)
+	runDir := filepath.Join(baseDir, runName)
+	err = os.MkdirAll(runDir, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to create run directory: %w", err)
 	}
@@ -174,8 +180,8 @@ func runScan(cmd *cobra.Command, args []string) error {
 	todo.RunDir = runDir
 	finishpkg.RunDir = runDir
 
-	// 2. Initialize slog to write to separate log files inside runDir
-	handler, err := _interface.NewStrixLogHandler(runDir)
+	// 2. Initialize slog to write to shared log files in baseDir
+	handler, err := _interface.NewStrixLogHandler(baseDir, nonInteractive)
 	if err != nil {
 		return err
 	}
@@ -184,8 +190,8 @@ func runScan(cmd *cobra.Command, args []string) error {
 	slog.SetDefault(slog.New(handler))
 
 	// Print single notification to console
-	fmt.Printf("Logs are being saved to: %s\n", filepath.Join(runDir, "strix.log"))
-	fmt.Printf("Agent activity is being saved to: %s\n", filepath.Join(runDir, "agent.log"))
+	fmt.Printf("Logs are being saved to: %s\n", filepath.Join(baseDir, "strix.log"))
+	fmt.Printf("Agent activity is being saved to: %s\n", filepath.Join(baseDir, "agent.log"))
 
 	slog.Info("STRIX Penetration Test Initiating...",
 		slog.Any("targets", targets),

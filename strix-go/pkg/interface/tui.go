@@ -15,8 +15,16 @@ import (
 	"github.com/usestrix/strix-go/pkg/tools/todo"
 )
 
-// tickMsg is used for periodic TUI updates
+// tickMsg is used for periodic TUI clock updates
 type tickMsg time.Time
+
+// snapshotMsg carries data fetched from background goroutines
+type snapshotMsg struct {
+	treeStr     string
+	todos       []*todo.Todo
+	notes       []*notes.Note
+	runFinished bool
+}
 
 // focusSection constants: 0=agent tree, 1=todo tasks, 2=right panel
 const (
@@ -41,12 +49,47 @@ type model struct {
 	leftTaskScrollOffset int
 	rightScrollOffsets   [2]int
 	tailLogs             bool
+
+	// Cached data updated by background snapshots — View() reads only these
+	cachedTreeStr string
+	cachedTodos   []*todo.Todo
+	cachedNotes   []*notes.Note
+
+	// Cached markdown renderer to avoid expensive recreation on every frame
+	renderer           *glamour.TermRenderer
+	lastRendererWidth  int
+}
+
+// fetchSnapshotCmd runs data fetching in a background goroutine so the event
+// loop (and therefore key handling) is never blocked by lock contention.
+func fetchSnapshotCmd() tea.Cmd {
+	return func() tea.Msg {
+		agents_graph.GraphLock.RLock()
+		rootID := agents_graph.RootAgentID
+		treeStr := ""
+		if rootID != "" {
+			treeStr = buildTreeStringLocked(rootID, "", true, 0)
+		} else {
+			treeStr = "Initializing Agent Orchestration Graph..."
+		}
+		rootNode, exists := agents_graph.AgentNodes[agents_graph.RootAgentID]
+		finished := exists && (rootNode.Status == "finished" || rootNode.Status == "failed")
+		agents_graph.GraphLock.RUnlock()
+
+		return snapshotMsg{
+			treeStr:     treeStr,
+			todos:       todo.GetTodoList(),
+			notes:       notes.GetNotesList(),
+			runFinished: finished,
+		}
+	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+	return tea.Batch(
+		tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) }),
+		fetchSnapshotCmd(),
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -117,18 +160,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.scanRunning && !m.runFinished {
 			m.elapsed = time.Since(m.startTime)
 		}
+		return m, tea.Batch(
+			tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) }),
+			fetchSnapshotCmd(),
+		)
 
-		agents_graph.GraphLock.RLock()
-		rootNode, exists := agents_graph.AgentNodes[agents_graph.RootAgentID]
-		agents_graph.GraphLock.RUnlock()
-
-		if exists && (rootNode.Status == "finished" || rootNode.Status == "failed") {
+	case snapshotMsg:
+		m.cachedTreeStr = msg.treeStr
+		m.cachedTodos = msg.todos
+		m.cachedNotes = msg.notes
+		if msg.runFinished {
 			m.runFinished = true
 		}
-
-		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
-			return tickMsg(t)
-		})
 	}
 	return m, nil
 }
@@ -218,42 +261,31 @@ func (m model) View() string {
 		taskTitleStyle = activeTitleStyle
 	}
 
-	// Agent tree content
-	var treeView string
-	agents_graph.GraphLock.RLock()
-	rootID := agents_graph.RootAgentID
-	agents_graph.GraphLock.RUnlock()
-
-	if rootID != "" {
-		treeView = buildTreeString(rootID, "", true)
-	} else {
-		treeView = "Initializing Agent Orchestration Graph..."
-	}
-
-	treeLines := strings.Split(strings.TrimSpace(treeView), "\n")
-	treeContentLines := treeHeight - 1 // reserve 1 for title
+	// Agent tree — use cached string, no lock needed
+	treeLines := strings.Split(strings.TrimSpace(m.cachedTreeStr), "\n")
+	treeContentLines := treeHeight - 1
 	if treeContentLines < 1 {
 		treeContentLines = 1
 	}
 
-	if m.leftTreeScrollOffset > len(treeLines)-1 {
-		m.leftTreeScrollOffset = len(treeLines) - 1
+	treeOffset := m.leftTreeScrollOffset
+	if treeOffset > len(treeLines)-1 {
+		treeOffset = len(treeLines) - 1
 	}
-	if m.leftTreeScrollOffset < 0 {
-		m.leftTreeScrollOffset = 0
+	if treeOffset < 0 {
+		treeOffset = 0
 	}
-	visibleTreeLines := treeLines[m.leftTreeScrollOffset:]
+	visibleTreeLines := treeLines[treeOffset:]
 	if len(visibleTreeLines) > treeContentLines {
 		visibleTreeLines = visibleTreeLines[:treeContentLines]
 	}
 
-	// Todo tasks content
-	todoList := todo.GetTodoList()
+	// Todo tasks — use cached slice, no lock needed
 	var taskLines []string
-	if len(todoList) == 0 {
+	if len(m.cachedTodos) == 0 {
 		taskLines = []string{"No tasks yet."}
 	} else {
-		for _, t := range todoList {
+		for _, t := range m.cachedTodos {
 			statusBox := "[ ]"
 			switch t.Status {
 			case "done":
@@ -267,18 +299,19 @@ func (m model) View() string {
 		}
 	}
 
-	taskContentLines := taskHeight - 1 // reserve 1 for title
+	taskContentLines := taskHeight - 1
 	if taskContentLines < 1 {
 		taskContentLines = 1
 	}
 
-	if m.leftTaskScrollOffset > len(taskLines)-1 {
-		m.leftTaskScrollOffset = len(taskLines) - 1
+	taskOffset := m.leftTaskScrollOffset
+	if taskOffset > len(taskLines)-1 {
+		taskOffset = len(taskLines) - 1
 	}
-	if m.leftTaskScrollOffset < 0 {
-		m.leftTaskScrollOffset = 0
+	if taskOffset < 0 {
+		taskOffset = 0
 	}
-	visibleTaskLines := taskLines[m.leftTaskScrollOffset:]
+	visibleTaskLines := taskLines[taskOffset:]
 	if len(visibleTaskLines) > taskContentLines {
 		visibleTaskLines = visibleTaskLines[:taskContentLines]
 	}
@@ -353,47 +386,53 @@ func (m model) View() string {
 		}
 		rightView = strings.Join(visibleLogs, "\n")
 
-	case 1: // Findings
-		noteList := notes.GetNotesList()
-		if len(noteList) == 0 {
+	case 1: // Findings — use cached notes, no lock needed
+		if len(m.cachedNotes) == 0 {
 			rightView = "No findings/notes recorded yet."
 		} else {
-			var sb strings.Builder
-			renderer, _ := glamour.NewTermRenderer(
-				glamour.WithAutoStyle(),
-				glamour.WithWordWrap(rightWidth-4),
-			)
+			// Create or update renderer only when width changes to avoid expensive recreation
+			if m.renderer == nil || m.lastRendererWidth != rightWidth {
+				renderer, _ := glamour.NewTermRenderer(
+					glamour.WithAutoStyle(),
+					glamour.WithWordWrap(rightWidth-4),
+				)
+				m.renderer = renderer
+				m.lastRendererWidth = rightWidth
+			}
 
-			for _, n := range noteList {
+			var sb strings.Builder
+			for _, n := range m.cachedNotes {
 				header := lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color("#22c55e")).
 					Render(fmt.Sprintf("[ %s ] (%s) - %s", n.Title, n.Category, n.UpdatedAt))
 				sb.WriteString(header + "\n")
 
-				content, err := renderer.Render(n.Content)
-				if err == nil {
-					sb.WriteString(content)
+				if m.renderer != nil {
+					content, err := m.renderer.Render(n.Content)
+					if err == nil {
+						sb.WriteString(content)
+					} else {
+						sb.WriteString(n.Content + "\n")
+					}
 				} else {
 					sb.WriteString(n.Content + "\n")
 				}
 				sb.WriteString("\n")
 			}
 
-			// We don't use lipgloss.Render(sb.String()) here because glamour already handled wrapping and ANSI.
-			// We just need to split into lines for scrolling.
 			wrappedLines := strings.Split(sb.String(), "\n")
 
-		maxOffset := len(wrappedLines) - rightContentHeight
-		if maxOffset < 0 {
-			maxOffset = 0
-		}
-		if m.rightScrollOffsets[1] > maxOffset {
-			m.rightScrollOffsets[1] = maxOffset
-		}
-		if m.rightScrollOffsets[1] < 0 {
-			m.rightScrollOffsets[1] = 0
-		}
+			maxOffset := len(wrappedLines) - rightContentHeight
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			if m.rightScrollOffsets[1] > maxOffset {
+				m.rightScrollOffsets[1] = maxOffset
+			}
+			if m.rightScrollOffsets[1] < 0 {
+				m.rightScrollOffsets[1] = 0
+			}
 
 			visibleLines := wrappedLines
 			if len(wrappedLines) > m.rightScrollOffsets[1] {
@@ -439,13 +478,16 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 }
 
+// buildTreeString acquires the read lock and builds the tree string.
+// Must only be called from background goroutines (not View/Update).
 func buildTreeString(id string, indent string, isLast bool) string {
 	agents_graph.GraphLock.RLock()
 	defer agents_graph.GraphLock.RUnlock()
-	return buildTreeStringRecursive(id, indent, isLast, 0)
+	return buildTreeStringLocked(id, indent, isLast, 0)
 }
 
-func buildTreeStringRecursive(id string, indent string, isLast bool, depth int) string {
+// buildTreeStringLocked builds the tree string; caller must hold GraphLock.RLock.
+func buildTreeStringLocked(id string, indent string, isLast bool, depth int) string {
 	node, exists := agents_graph.AgentNodes[id]
 	if !exists {
 		return ""
@@ -495,7 +537,7 @@ func buildTreeStringRecursive(id string, indent string, isLast bool, depth int) 
 
 	for i, childID := range children {
 		lastChild := i == len(children)-1
-		nodeLine += buildTreeStringRecursive(childID, nextIndent, lastChild, depth+1)
+		nodeLine += buildTreeStringLocked(childID, nextIndent, lastChild, depth+1)
 	}
 	return nodeLine
 }

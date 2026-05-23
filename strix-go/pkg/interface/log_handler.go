@@ -11,24 +11,27 @@ import (
 	"sync"
 )
 
+type tuiState struct {
+	mu         sync.Mutex
+	tuiLogs    []string
+	maxTuiLogs int
+	systemFile *os.File
+	agentFile  *os.File
+	writeStdout bool
+}
+
 // StrixLogHandler is a custom slog handler that routes logs to different files
 // based on whether they are agent-specific or system-wide.
 type StrixLogHandler struct {
-	mu             sync.Mutex
 	systemLog      slog.Handler
 	agentLog       slog.Handler
-	systemFile     *os.File
-	agentFile      *os.File
 	isAgentHandler bool
-
-	// TUI buffer
-	tuiLogs    []string
-	maxTuiLogs int
+	shared         *tuiState
 }
 
-func NewStrixLogHandler(runDir string) (*StrixLogHandler, error) {
-	systemPath := filepath.Join(runDir, "strix.log")
-	agentPath := filepath.Join(runDir, "agent.log")
+func NewStrixLogHandler(logDir string, writeStdout bool) (*StrixLogHandler, error) {
+	systemPath := filepath.Join(logDir, "strix.log")
+	agentPath := filepath.Join(logDir, "agent.log")
 
 	sf, err := os.OpenFile(systemPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -44,12 +47,15 @@ func NewStrixLogHandler(runDir string) (*StrixLogHandler, error) {
 	logOpts := &slog.HandlerOptions{Level: slog.LevelDebug}
 
 	return &StrixLogHandler{
-		systemLog:  slog.NewTextHandler(sf, logOpts),
-		agentLog:   slog.NewTextHandler(af, logOpts),
-		systemFile: sf,
-		agentFile:  af,
-		tuiLogs:    make([]string, 0, 500),
-		maxTuiLogs: 500,
+		systemLog: slog.NewTextHandler(sf, logOpts),
+		agentLog:  slog.NewTextHandler(af, logOpts),
+		shared: &tuiState{
+			systemFile: sf,
+			agentFile:  af,
+			tuiLogs:    make([]string, 0, 500),
+			maxTuiLogs: 500,
+			writeStdout: writeStdout,
+		},
 	}, nil
 }
 
@@ -58,9 +64,6 @@ func (h *StrixLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *StrixLogHandler) Handle(ctx context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	isAgentActivity := h.isAgentHandler
 	if !isAgentActivity {
 		r.Attrs(func(a slog.Attr) bool {
@@ -135,9 +138,15 @@ func (h *StrixLogHandler) appendToTuiBuffer(r slog.Record) {
 		msg += fmt.Sprintf(" details_omitted=%d", omittedAttrs)
 	}
 
-	h.tuiLogs = append(h.tuiLogs, msg)
-	if len(h.tuiLogs) > h.maxTuiLogs {
-		h.tuiLogs = h.tuiLogs[1:]
+	h.shared.mu.Lock()
+	defer h.shared.mu.Unlock()
+	h.shared.tuiLogs = append(h.shared.tuiLogs, msg)
+	if len(h.shared.tuiLogs) > h.shared.maxTuiLogs {
+		h.shared.tuiLogs = h.shared.tuiLogs[1:]
+	}
+
+	if h.shared.writeStdout {
+		fmt.Println(msg)
 	}
 }
 
@@ -156,9 +165,6 @@ func sanitizeTuiAttrValue(v interface{}) string {
 }
 
 func (h *StrixLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	isAgent := h.isAgentHandler
 	if !isAgent {
 		for _, a := range attrs {
@@ -172,44 +178,35 @@ func (h *StrixLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &StrixLogHandler{
 		systemLog:      h.systemLog.WithAttrs(attrs),
 		agentLog:       h.agentLog.WithAttrs(attrs),
-		systemFile:     h.systemFile,
-		agentFile:      h.agentFile,
 		isAgentHandler: isAgent,
-		tuiLogs:        h.tuiLogs,
-		maxTuiLogs:     h.maxTuiLogs,
+		shared:         h.shared,
 	}
 }
 
 func (h *StrixLogHandler) WithGroup(name string) slog.Handler {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	return &StrixLogHandler{
 		systemLog:      h.systemLog.WithGroup(name),
 		agentLog:       h.agentLog.WithGroup(name),
-		systemFile:     h.systemFile,
-		agentFile:      h.agentFile,
 		isAgentHandler: h.isAgentHandler,
-		tuiLogs:        h.tuiLogs,
-		maxTuiLogs:     h.maxTuiLogs,
+		shared:         h.shared,
 	}
 }
 
 func (h *StrixLogHandler) Close() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.systemFile != nil {
-		h.systemFile.Close()
+	h.shared.mu.Lock()
+	defer h.shared.mu.Unlock()
+	if h.shared.systemFile != nil {
+		h.shared.systemFile.Close()
 	}
-	if h.agentFile != nil {
-		h.agentFile.Close()
+	if h.shared.agentFile != nil {
+		h.shared.agentFile.Close()
 	}
 }
 
 func (h *StrixLogHandler) GetTuiLogs() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	copied := make([]string, len(h.tuiLogs))
-	copy(copied, h.tuiLogs)
+	h.shared.mu.Lock()
+	defer h.shared.mu.Unlock()
+	copied := make([]string, len(h.shared.tuiLogs))
+	copy(copied, h.shared.tuiLogs)
 	return copied
 }

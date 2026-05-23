@@ -30,6 +30,7 @@ type Agent struct {
 	SystemContext    map[string]interface{}
 	ExecutionContext tools.ExecutionContext
 	AvailableTools   []string
+	OwnerSandbox     bool // true if this agent created the sandbox and should clean it up
 }
 
 type RunConfig struct {
@@ -197,6 +198,7 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 		}
 
 		agent.Sandbox = sandbox
+		agent.OwnerSandbox = true // Agent created this sandbox, so it should clean it up
 	}
 
 	// Agents are orchestrators that run in parent context.
@@ -220,6 +222,17 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 
 func (a *Agent) Run(ctx context.Context) error {
 	slog.Info("Starting agent execution loop", slog.String("agent_id", a.ID), slog.String("agent_name", a.Name))
+
+	// Clean up sandbox on exit (only if this agent created it, not if inherited from parent)
+	defer func() {
+		if a.OwnerSandbox && a.Sandbox != nil && a.ID != "" {
+			slog.Info("Cleaning up agent sandbox", slog.String("agent_id", a.ID), slog.String("container_id", a.Sandbox.WorkspaceID))
+			docker, err := runtime.NewDockerRuntime()
+			if err == nil {
+				_ = docker.DestroySandbox(ctx, a.Sandbox.WorkspaceID)
+			}
+		}
+	}()
 
 	// Backoff state for LLM API errors. Reset on successful completion.
 	var llmConsecutiveErrors int
