@@ -94,6 +94,11 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
     is_flag=True,
     help="Enable verbose output",
 )
+@click.option(
+    "--mock-tools",
+    is_flag=True,
+    help="Use mock tools for testing (no Docker required)",
+)
 def scan(
     target: str,
     scan_mode: str,
@@ -103,6 +108,7 @@ def scan(
     timeout: float,
     log_file: Optional[str],
     verbose: bool,
+    mock_tools: bool,
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -155,8 +161,16 @@ def scan(
 
     # Build agents and dependencies
     try:
-        agents = _build_agents(model_spec, skill_list, run_config)
         tool_registry = ToolRegistry()
+
+        # Register mock tools if requested
+        if mock_tools:
+            from strix_pydantic.tools.mock_tools import register_mock_tools
+            click.echo("📦 Using mock tools (testing mode)")
+            register_mock_tools(tool_registry)
+
+        agents = _build_agents(model_spec, skill_list, run_config, tool_registry)
+
         deps = StrixDeps(
             sandbox_url=sandbox_url,
             tool_registry=tool_registry,
@@ -188,6 +202,7 @@ def _build_agents(
     model_spec: str,
     skill_list: list[str],
     run_config: RunConfig,
+    tool_registry: Optional[Any] = None,
 ) -> dict[str, Any]:
     """
     Build Agent instances for each role.
@@ -196,17 +211,25 @@ def _build_agents(
         model_spec: Model specification string (e.g., "anthropic:claude-haiku-4-5")
         skill_list: List of skill IDs
         run_config: Run configuration
+        tool_registry: Optional ToolRegistry with registered tools
 
     Returns:
         Dict of role -> Agent[StrixDeps, Any]
     """
     from pydantic_ai import Agent
+    from strix_pydantic.tools.tool_wrapper import build_tools_from_registry
 
     agents = {}
     roles = ["reconnaissance", "exploitation", "post_exploitation"]
 
     # Build skill capabilities
     skill_factory = SkillCapabilityFactory()
+
+    # Build registry toolset if tools are registered
+    registry_toolset = None
+    if tool_registry and len(tool_registry._tools) > 0:
+        registry_toolset = build_tools_from_registry(tool_registry)
+        logger.info(f"Built toolset with {len(tool_registry._tools)} registered tools")
 
     for role in roles:
         # Get skills for this role
@@ -220,10 +243,15 @@ def _build_agents(
         )
 
         # Build agent with skill-derived instructions and model spec
+        # Include both skill toolset and registry toolset if available
+        toolsets = [skill_build.toolset]
+        if registry_toolset:
+            toolsets.append(registry_toolset)
+
         agent = Agent(
             model_spec,
             instructions=skill_build.instructions,
-            toolsets=[skill_build.toolset],
+            toolsets=toolsets,
         )
 
         agents[role] = agent
