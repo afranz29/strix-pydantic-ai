@@ -99,6 +99,12 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
     is_flag=True,
     help="Use mock tools for testing (no Docker required)",
 )
+@click.option(
+    "--instruction",
+    type=str,
+    default="",
+    help="Custom instruction for the agent (overrides default target/scan-mode prompt)",
+)
 def scan(
     target: str,
     scan_mode: str,
@@ -109,6 +115,7 @@ def scan(
     log_file: Optional[str],
     verbose: bool,
     mock_tools: bool,
+    instruction: str,
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -149,6 +156,7 @@ def scan(
         target=target,
         scan_mode=scan_mode,
         active_skills=skill_list,
+        instruction=instruction,
     )
 
     # Create run config
@@ -161,21 +169,43 @@ def scan(
 
     # Build agents and dependencies
     try:
+        from strix_pydantic.runtime.sandbox_client import SandboxClient
+
         tool_registry = ToolRegistry()
+
+        # Create sandbox client for tool execution
+        import os
+        auth_token = os.getenv("STRIX_SANDBOX_TOKEN", "secret123")
+
+        sandbox_client = SandboxClient(
+            base_url=sandbox_url,
+            auth_token=auth_token,
+            execute_timeout=run_config.execute_timeout,
+        )
 
         # Register mock tools if requested
         if mock_tools:
             from strix_pydantic.tools.mock_tools import register_mock_tools
             click.echo("📦 Using mock tools (testing mode)")
             register_mock_tools(tool_registry)
+        else:
+            click.echo(f"🐳 Using Docker sandbox at {sandbox_url}")
+            _register_strix_tools(tool_registry)
 
-        agents = _build_agents(model_spec, skill_list, run_config, tool_registry)
+        agents = _build_agents(
+            model_spec,
+            skill_list,
+            run_config,
+            tool_registry,
+            sandbox_client=sandbox_client,
+        )
 
         deps = StrixDeps(
             sandbox_url=sandbox_url,
             tool_registry=tool_registry,
             run_config=run_config,
             agents=agents,
+            sandbox_client=sandbox_client,
         )
 
         click.echo(f"✅ Initialized {len(agents)} agent roles")
@@ -198,20 +228,55 @@ def scan(
     _print_final_summary(state)
 
 
+def _register_strix_tools(tool_registry) -> None:
+    """
+    Register strix sandbox tools using stub signatures matching the real tool server.
+
+    Tool signatures are hardcoded to match what the sandbox exposes.
+    Execution always dispatches to the Docker sandbox.
+    """
+    from typing import Any
+
+    # Stubs match the real strix tool signatures exactly so pydantic-ai
+    # generates correct tool schemas for the LLM.
+
+    async def terminal_execute(
+        command: str,
+        is_input: bool = False,
+        timeout: float | None = None,
+        terminal_id: str | None = None,
+        no_enter: bool = False,
+    ) -> dict[str, Any]:
+        """Execute a shell command in the sandbox terminal. Returns output, exit code, and status."""
+        pass  # Replaced by sandbox dispatch wrapper
+
+    tool_registry.register_tool(
+        name="terminal_execute",
+        description="Execute a shell command in the sandbox terminal. Returns output, exit code, and status.",
+        callable_obj=terminal_execute,
+        contexts={"parent"},
+    )
+
+    click.echo("   Registered 1 strix tool: terminal_execute")
+    logger.info("Registered strix tool stubs for sandbox dispatch")
+
+
 def _build_agents(
     model_spec: str,
     skill_list: list[str],
     run_config: RunConfig,
     tool_registry: Optional[Any] = None,
+    sandbox_client: Optional[Any] = None,
 ) -> dict[str, Any]:
     """
-    Build Agent instances for each role.
+    Build Agent instances for each role with sandbox tool dispatch.
 
     Args:
         model_spec: Model specification string (e.g., "anthropic:claude-haiku-4-5")
         skill_list: List of skill IDs
         run_config: Run configuration
         tool_registry: Optional ToolRegistry with registered tools
+        sandbox_client: SandboxClient instance for tool execution
 
     Returns:
         Dict of role -> Agent[StrixDeps, Any]
@@ -225,12 +290,6 @@ def _build_agents(
     # Build skill capabilities
     skill_factory = SkillCapabilityFactory()
 
-    # Build registry toolset if tools are registered
-    registry_toolset = None
-    if tool_registry and len(tool_registry._tools) > 0:
-        registry_toolset = build_tools_from_registry(tool_registry)
-        logger.info(f"Built toolset with {len(tool_registry._tools)} registered tools")
-
     for role in roles:
         # Get skills for this role
         role_skills = skill_list if skill_list else []
@@ -241,6 +300,16 @@ def _build_agents(
             role=role,
             context="parent",
         )
+
+        # Build registry toolset with sandbox dispatch if tools are registered
+        registry_toolset = None
+        if tool_registry and len(tool_registry._tools) > 0 and sandbox_client:
+            registry_toolset = build_tools_from_registry(
+                tool_registry,
+                sandbox_client=sandbox_client,
+                agent_id=role,
+            )
+            logger.info(f"Built sandbox toolset for {role} with {len(tool_registry._tools)} tools")
 
         # Build agent with skill-derived instructions and model spec
         # Include both skill toolset and registry toolset if available
@@ -326,6 +395,12 @@ def _print_final_summary(state: StrixRunState) -> None:
     click.echo(f"🤖 [AGENT STATUSES]")
     for role, status in state.agent_statuses.items():
         click.echo(f"   {role}: {status}")
+
+    if state.agent_responses:
+        click.echo(f"\n💬 [AGENT RESPONSES]")
+        for role, response in state.agent_responses.items():
+            click.echo(f"\n--- {role} ---")
+            click.echo(response)
 
     if state.vulnerabilities:
         click.echo(f"\n🚨 [VULNERABILITIES IDENTIFIED ({len(state.vulnerabilities)})]")

@@ -36,11 +36,10 @@ class ToolExecutionRequest(BaseModel):
 
 
 class ToolExecutionResponse(BaseModel):
-    """Response from tool execution."""
+    """Response from tool execution. Matches strix tool_server.py schema."""
 
-    ok: bool
     result: Any | None = None
-    error: Optional[ToolError] = None
+    error: str | None = None  # Server returns error as plain string
 
 
 @dataclass
@@ -60,6 +59,7 @@ class SandboxClient:
     def __init__(
         self,
         base_url: str,
+        auth_token: str = "",
         connect_timeout: float = 5.0,
         execute_timeout: float = 120.0,
         orchestrator_step_timeout: float = 180.0,
@@ -69,11 +69,13 @@ class SandboxClient:
 
         Args:
             base_url: Base URL of sandbox server (e.g., http://127.0.0.1:8000)
+            auth_token: Bearer token for authentication (optional)
             connect_timeout: Network connection timeout in seconds
             execute_timeout: Per-tool execution timeout in seconds
             orchestrator_step_timeout: Orchestrator step outer bound in seconds
         """
         self.base_url = base_url.rstrip("/")
+        self.auth_token = auth_token
         self.connect_timeout = connect_timeout
         self.execute_timeout = execute_timeout
         self.orchestrator_step_timeout = orchestrator_step_timeout
@@ -123,9 +125,14 @@ class SandboxClient:
         req = ToolExecutionRequest(agent_id=agent_id, tool_name=tool_name, kwargs=kwargs)
 
         try:
+            headers = {}
+            if self.auth_token:
+                headers["Authorization"] = f"Bearer {self.auth_token}"
+
             response = await self._client.post(
                 "/execute",
                 json=req.model_dump(),
+                headers=headers,
                 timeout=httpx.Timeout(self.execute_timeout),
             )
             response.raise_for_status()
@@ -167,29 +174,20 @@ class SandboxClient:
                 retriable=False,
             )
 
-        if resp.ok:
-            return SandboxToolResult(
-                ok=True,
-                result=resp.result,
-                error_code=None,
-                error_message=None,
-                retriable=False,
-            )
-
         if resp.error:
             return SandboxToolResult(
                 ok=False,
                 result=None,
-                error_code=resp.error.code,
-                error_message=resp.error.message,
-                retriable=resp.error.retriable,
+                error_code="tool_runtime_error",
+                error_message=resp.error,
+                retriable=False,
             )
 
         return SandboxToolResult(
-            ok=False,
-            result=None,
-            error_code="tool_runtime_error",
-            error_message="Unknown error from sandbox",
+            ok=True,
+            result=resp.result,
+            error_code=None,
+            error_message=None,
             retriable=False,
         )
 

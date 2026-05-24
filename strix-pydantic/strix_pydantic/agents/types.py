@@ -26,6 +26,7 @@ class StrixRunState:
     run_id: str
     target: str
     scan_mode: str  # "quick" | "standard" | "deep"
+    instruction: str = ""  # Custom instruction for the agent
 
     # Resolved in BootstrapRun
     active_skills: list[str] = field(default_factory=list)
@@ -35,6 +36,9 @@ class StrixRunState:
 
     # Agent lifecycle
     agent_statuses: dict[str, str] = field(default_factory=dict)  # role -> status string
+
+    # Agent response text, keyed by role
+    agent_responses: dict[str, str] = field(default_factory=dict)
 
     # Findings
     vulnerabilities: list[dict[str, Any]] = field(default_factory=list)
@@ -61,6 +65,7 @@ class StrixDeps:
     tool_registry: Any  # ToolRegistry instance
     run_config: RunConfig
     agents: dict[str, Agent[Any, Any]]  # Pre-constructed Agent[StrixDeps, ...] per role
+    sandbox_client: Any = None  # SandboxClient instance, initialized in orchestrator
 
     # Optional context for tracking
     parent_context: dict[str, Any] = field(default_factory=dict)
