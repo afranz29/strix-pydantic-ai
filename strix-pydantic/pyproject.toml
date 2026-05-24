@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strix-pydantic"
+version = "0.1.0"
+description = "Strix non-interactive orchestrator using Pydantic AI and Pydantic Graph"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai==1.102.0",
+    "pydantic-graph>=1.0",
+    "pydantic>=2.0",
+    "httpx>=0.27.0",
+    "click>=8.1.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+strix-pydantic = "strix_pydantic.interface.cli:scan"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["strix_pydantic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
