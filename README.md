@@ -6,28 +6,34 @@ Strix is an AI-powered security pentesting framework that coordinates multiple a
 
 ---
 
-## 🚀 Project Evolution: The Pydantic AI Pivot
+## 🚀 Current Status
 
-Strix is transitioning its core orchestration to a new flagship implementation based on **[Pydantic AI](https://github.com/pydantic/pydantic-ai)**. This version leverages the robust type safety of Pydantic and the sophisticated orchestration of `pydantic-graph` to provide the most reliable and extensible version of the framework to date.
-
-### Current Implementations
+Strix is actively being developed with two implementations:
 
 | Implementation | Status | Path | Description |
 |---|---|---|---|
-| **Strix Pydantic** | **Flagship (Active)** | `strix-pydantic/` | Next-gen Python implementation. Features graph-based orchestration, structured extraction, and strict type safety. |
-| **Strix Go** | Maintenance | `strix-go/` | High-concurrency port. Focused on binary distribution and performance. |
-| **Strix Legacy** | Legacy | `strix/` | The original Python prototype and research codebase. |
+| **Strix Pydantic** | In Development | `strix-pydantic/` | Python implementation using Pydantic AI v1.102.0 and Pydantic Graph. Core orchestration complete; tool integration in progress. |
+| **Strix Go** | Maintenance | `strix-go/` | Go port for high-concurrency and binary distribution. Currently in stabilization phase. |
+| **Strix Legacy** | Legacy | `strix/` | Original Python prototype. Maintained for reference and skill library source. |
 
 ---
 
 ## ✨ Key Features (Pydantic Implementation)
 
-- **Graph-Based Orchestration** — Sophisticated multi-agent workflows using `pydantic-graph` for resilient and traceable scan logic.
-- **Structured Findings** — Native Pydantic model extraction for vulnerabilities, notes, and evidence.
-- **Type-Safe Tooling** — End-to-end validation of tool arguments and results.
-- **Sandbox Isolation** — Automatic Docker sandbox lifecycle management for safe tool execution.
-- **Context-Aware Tools** — Intelligent tool filtering based on agent role and execution environment (Sandbox vs. Host).
-- **Multi-LLM Support** — Native integration with Anthropic, OpenAI, Google Gemini, and more.
+### Implemented ✅
+- **Graph-Based Orchestration** — Unified multi-step orchestrator using Pydantic Graph, coordinating 3 agent roles (reconnaissance, exploitation, post_exploitation).
+- **Multi-LLM Provider Support** — String-based model selection with automatic fallback:
+  - **Anthropic** (Primary): `claude-haiku-4-5` (when `ANTHROPIC_API_KEY` is set)
+  - **OpenAI**: `gpt-4o-mini` (when `OPENAI_API_KEY` is set)
+  - **Google Gemini**: `gemini-3.5-flash` (fallback when Google API key is set)
+- **Skill-Based Agent Instructions** — Dynamically loads capabilities from `strix/skills/` markdown files.
+- **Type-Safe Definitions** — Structured agent outputs using Pydantic models (vulnerabilities, notes, findings).
+- **CLI Interface** — Non-interactive scanner with `--target`, `--scan-mode`, `--model` override, and testing modes.
+- **Docker Sandbox Support** — Automatic Docker sandbox lifecycle with configurable timeout and cleanup.
+
+### In Progress 🚧
+- **Tool Execution Dispatch** — Sandbox client interface ready; endpoint routing and actual execution integration pending.
+- **Message History Continuity** — Framework support present; multi-turn agent reasoning optimization in progress.
 
 ---
 
@@ -46,53 +52,143 @@ Strix is transitioning its core orchestration to a new flagship implementation b
 git clone https://github.com/usestrix/strix.git
 cd strix
 
-# Install flagship dependencies
+# Install dependencies
 cd strix-pydantic
 uv sync
 cd ..
 
-# Configure your API key
+# Configure your API key (Anthropic recommended for default model)
 export ANTHROPIC_API_KEY="your-key-here"
 
-# Run a scan using the root wrapper
-./strix.sh --target http://example.com --scan-mode quick
+# Run a scan
+python -m strix_pydantic --target http://example.com --scan-mode quick
+
+# Or use the installed CLI command
+strix-pydantic --target http://example.com --scan-mode standard --verbose
 ```
 
-> [!TIP]
-> Use `./strix.sh --help` to see all available options including `--confirm` for interactive phase gates and `--verbose` for detailed agent reasoning.
+**What to expect:**
+- Logs are written to the current directory: `./strix_<run_id>.log`
+- Scan modes: `quick` (fast), `standard` (balanced), `deep` (thorough)
+- Docker sandbox is created automatically and cleaned up after the scan
+
+### Common Options
+
+```bash
+# Override model selection
+strix-pydantic --target http://example.com --model gpt-4o
+
+# Use mock tools for testing (no Docker required)
+strix-pydantic --target http://example.com --mock-tools --verbose
+
+# Interactive phase gates between agent roles
+strix-pydantic --target http://example.com --confirm
+
+# Custom agent instruction
+strix-pydantic --target http://example.com --instruction "Focus on API authentication"
+```
+
+See `python -m strix_pydantic --help` for all available options.
 
 ---
 
-## 🛡️ Supported LLM Providers
+## 🛡️ Supported LLM Providers & Model Selection
 
-Strix Pydantic supports a wide range of providers through Pydantic AI's unified interface:
+Strix Pydantic uses automatic model selection based on available API keys, with a clear fallback priority:
 
-- **Anthropic** (Preferred) — Claude 3.5 Sonnet, Claude 3 Opus
-- **Google** — Gemini 1.5 Pro/Flash, Gemini 2.0
-- **OpenAI** — GPT-4o, GPT-4 Turbo
-- **Local Models** — Support via Ollama or vLLM (OpenAI-compatible endpoints)
+### Provider Priority & Default Models
 
-The system automatically selects the best available model based on your environment keys (defaulting to `claude-haiku-4-5` if available, or `gemini-2.0-flash`).
+| Provider | API Key | Default Model | Command Override |
+|---|---|---|---|
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` | `--model claude-3-5-sonnet` |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o-mini` | `--model gpt-4o` |
+| **Google** | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `gemini-3.5-flash` | `--model gemini-2.0-flash` |
+
+### Model Selection Logic
+
+1. **Environment Override**: If `STRIX_LLM` is set, use that exact model string
+2. **Key Detection**: Check for API keys in order: Anthropic → OpenAI → Google
+3. **Default**: Return the appropriate model for the first available key
+4. **Error**: If no API keys are found, the scan will fail with a clear error message
+
+### Specifying Models
+
+The `--model` flag accepts model names with or without provider prefixes:
+
+```bash
+# With provider prefix (explicit)
+strix-pydantic --target http://example.com --model "anthropic:claude-3-5-sonnet"
+
+# Without prefix (auto-detected from model name pattern)
+strix-pydantic --target http://example.com --model "claude-3-5-sonnet"
+strix-pydantic --target http://example.com --model "gpt-4o"
+strix-pydantic --target http://example.com --model "gemini-2.0-flash"
+```
+
+Model name patterns are recognized:
+- **Claude models**: Start with `claude-` or contain "claude" → mapped to Anthropic
+- **Gemini models**: Contain "gemini" or "flash" → mapped to Google
+- **GPT models**: Contain `gpt-`, `gpt4`, `o1-`, `o3-` → mapped to OpenAI
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture & Implementation Details
 
-For technical details on the various implementations, see:
+### Pydantic Implementation (Primary Development)
+- **Technology Stack**: Pydantic AI v1.102.0 + Pydantic Graph v1.0+ (stable APIs)
+- **Core Orchestrator**: Unified `StepContext`-based graph with 3 agent roles
+- **State Management**: Immutable `StrixRunState` flowing through graph steps
+- **Tool Integration**: Docker sandbox client with context-aware tool filtering (in progress)
+- **Skills System**: Markdown-based capability loading from `strix/skills/`
 
-- **[Pydantic Implementation (Flagship)](./strix-pydantic/README.md)** — Current focus and architecture.
-- **[Go Port](./strix-go/README.md)** — High-concurrency design and performance notes.
-- **[Legacy Python](./strix/README.md)** — Original concepts and skill system.
+**Key Files**:
+- `strix-pydantic/strix_pydantic/interface/cli.py` — CLI entry point with all scan options
+- `strix-pydantic/strix_pydantic/agents/pydantic_orchestrator.py` — Graph orchestration logic
+- `strix-pydantic/strix_pydantic/config/model_config.py` — Provider detection and model resolution
+
+**Implementation Status**: See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for detailed progress on core framework, tool integration, and remaining work.
+
+### Go Port
+- **Location**: `strix-go/`
+- **Status**: Maintenance phase; LLM integration under evaluation
+- **Purpose**: High-concurrency binary distribution and performance testing
+
+### Legacy Python
+- **Location**: `strix/`
+- **Purpose**: Original prototype; skills library is actively used by Pydantic implementation
+- **Status**: Reference and skill source only
+
+For detailed architecture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
 ## 🤝 Contributing
 
-We welcome contributions across all implementations! 
+We welcome contributions! The project is actively being developed with a focus on the Pydantic implementation.
 
-- **Bug Reports**: Open an issue labeled with the relevant implementation (e.g., `area/pydantic`, `area/go`).
-- **Feature Requests**: Use the feature request template.
-- **Development**: See `CONTRIBUTING.md` for workflow guidelines.
+### Getting Started with Development
+
+```bash
+# Install dev dependencies
+cd strix-pydantic
+uv sync  # Installs all dependencies including dev tools
+
+# Run tests
+uv run pytest -v
+
+# Format and lint
+uv run ruff format .
+uv run ruff check . --fix
+```
+
+### Areas for Contribution
+
+- **Tool Integration** (High Priority): Wire sandbox client tool dispatch and implement tool result parsing
+- **Testing**: Add unit and integration tests for orchestrator and tool execution
+- **Documentation**: Expand skill library documentation and architecture details
+- **Go Port Stabilization**: LLM integration improvements and tool binding
+
+See `CONTRIBUTING.md` for detailed workflow guidelines and `IMPLEMENTATION_STATUS.md` for current priorities.
 
 ---
 
