@@ -10,6 +10,29 @@ from .types import RunConfig, StrixDeps, StrixRunState
 logger = logging.getLogger(__name__)
 
 
+def _log_agent_result(role: str, result: Any) -> None:
+    """Log token usage at INFO and full message sequence at DEBUG."""
+    usage = result.usage
+    logger.debug(
+        f"   Tokens — input: {usage.input_tokens or 0}, "
+        f"output: {usage.output_tokens or 0}, "
+        f"cache_read: {usage.cache_read_tokens or 0}, "
+        f"cache_write: {usage.cache_write_tokens or 0}"
+    )
+
+    for msg in result.all_messages():
+        for part in getattr(msg, "parts", []):
+            kind = getattr(part, "part_kind", None)
+            if kind == "tool-call":
+                logger.debug(f"   [tool-call] {part.tool_name}({str(part.args)[:200]})")
+            elif kind == "tool-return":
+                logger.debug(f"   [tool-return] {part.tool_name} → {str(part.content)[:200]}")
+            elif kind == "text" and part.content:
+                logger.debug(f"   [text] {part.content[:300]}")
+            elif kind == "thinking" and part.content:
+                logger.debug(f"   [thinking] {part.content[:300]}")
+
+
 def build_orchestrator_graph() -> Any:
     """
     Build the orchestration graph using GraphBuilder.
@@ -79,65 +102,72 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     logger.info(f"✅ [BOOTSTRAP] Initialized {len(deps.agents)} agent roles")
 
     # ========== AGENT LOOP ==========
-    max_turns_per_role = 3  # Prevent infinite loops per role
-    role_turns = {}  # Track turns per role
+    roles = list(deps.agents.keys())
+    if not roles:
+        state.error = "No agents configured"
+        logger.error("❌ [ABORT] No agents")
+        return End("Aborted: No agents configured")
 
-    while state.iteration < state.max_iterations:
+    prior_outputs: dict[str, str] = {}
+
+    for role in roles:
         state.iteration += 1
-
-        # Select agent (use first role as pilot for now)
-        role = list(deps.agents.keys())[0] if deps.agents else None
-        if not role:
-            state.error = "No agents configured"
-            logger.error(f"❌ [ABORT] No agents")
-            return End(f"Aborted: No agents configured")
-
-        # Check if this role has exceeded turn limit
-        role_turns[role] = role_turns.get(role, 0) + 1
-        if role_turns[role] > max_turns_per_role:
-            logger.info(f"⏸  [AGENT] {role} reached max turns ({max_turns_per_role})")
-            break
-
         agent = deps.agents[role]
-        logger.info(f"🤖 [AGENT] {role} turn {state.iteration} (role turn {role_turns[role]})")
+        logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
+
+        # Build prompt — inject prior role outputs as context
+        base = f"Target: {state.target}. " + (
+            state.instruction if state.instruction else f"Scan mode: {state.scan_mode}."
+        )
+        if prior_outputs:
+            findings_block = "\n\n".join(
+                f"=== {r} findings ===\n{out}" for r, out in prior_outputs.items()
+            )
+            prompt = f"{base}\n\nPrevious agent findings:\n{findings_block}"
+        else:
+            prompt = base
 
         try:
-            # Run agent with message history for continuity
-            prompt = state.instruction if state.instruction else f"Target: {state.target}. Scan mode: {state.scan_mode}."
             result = await agent.run(
                 user_prompt=prompt,
                 message_history=state.message_history.get(role, []),
                 deps=deps,
             )
-
-            # Append agent response to history
-            state.message_history[role] = result.all_messages()
-
-            # Store response text for display
-            state.agent_responses[role] = str(result.output)
-
-            # Update agent status
-            state.agent_statuses[role] = "completed"
-
-            logger.info(f"✅ [AGENT] {role} completed turn {state.iteration}")
-            logger.info(f"   Response length: {len(str(result.output))} chars")
-
-            # Check if this is the final turn (usually agent signals completion in response)
-            response_text = str(result.output).lower()
-            if any(word in response_text for word in ["complete", "done", "finished", "summary"]):
-                logger.info(f"→  [AGENT] {role} signaled completion")
-                break
-
-            # For demo: do 1 turn per role, then move to finalize
-            if role_turns[role] >= 1:
-                logger.info(f"→  [AGENT] Completed turn for {role}, moving to finalize")
-                break
-
         except Exception as e:
             logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
             state.error = f"Agent execution error: {e}"
-            logger.error(f"❌ [ABORT] Agent failed")
             return End(f"Aborted: {state.error}")
+
+        _log_agent_result(role, result)
+
+        output = result.output
+        summary = output.summary if hasattr(output, "summary") else str(output)
+
+        state.message_history[role] = result.all_messages()
+        state.agent_responses[role] = summary
+        state.agent_statuses[role] = "completed"
+        prior_outputs[role] = summary
+
+        if hasattr(output, "vulnerabilities"):
+            for v in output.vulnerabilities:
+                state.vulnerabilities.append(v.model_dump())
+            logger.info(f"   Extracted {len(output.vulnerabilities)} vulnerabilities")
+
+        if hasattr(output, "notes"):
+            for n in output.notes:
+                state.notes.append({"content": n, "role": role})
+
+        logger.info(f"✅ [AGENT] {role} completed ({len(summary)} chars)")
+
+        # Between-phase confirmation gate
+        next_role_index = roles.index(role) + 1
+        if deps.confirm_proceed is not None and next_role_index < len(roles):
+            next_role = roles[next_role_index]
+            vuln_count = len(state.vulnerabilities)
+            snippet = summary[:300].rstrip()
+            if not deps.confirm_proceed(role, next_role, snippet, vuln_count):
+                logger.info(f"⏹  [CONFIRM] User stopped scan after {role}")
+                break
 
     # ========== FINALIZE ==========
     logger.info(f"📊 [FINALIZE] Generating summary")

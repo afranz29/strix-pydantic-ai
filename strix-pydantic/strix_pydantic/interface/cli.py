@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -19,9 +20,16 @@ from strix_pydantic.tools.tool_registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_file: Optional[Path] = None) -> Path:
+class _StrixFilter(logging.Filter):
+    """Pass only records from strix_pydantic.* loggers to suppress third-party noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith("strix_pydantic")
+
+
+def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Path:
     """
-    Setup logging with optional file output.
+    Setup logging with file output and live console output.
 
     Logs to current directory by default (./strix_<uuid>.log).
 
@@ -29,25 +37,31 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
         Path to log file
     """
     if log_file is None:
-        # Log to current directory
         log_file = Path.cwd() / f"strix_{uuid.uuid4().hex[:8]}.log"
 
-    handler = logging.FileHandler(log_file)
-    handler.setFormatter(
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)  # capture everything; handlers filter by level
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)  # log file always gets full detail
+    file_handler.setFormatter(
         logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
+    root_logger.addHandler(file_handler)
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.addFilter(_StrixFilter())
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)  # INFO by default
+    root_logger.addHandler(console_handler)
 
     return log_file
 
 
-@click.command()
+@click.command(no_args_is_help=True)
 @click.option(
     "--target",
     required=True,
@@ -106,6 +120,11 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
     default="",
     help="Custom instruction for the agent (overrides default target/scan-mode prompt)",
 )
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Pause and ask for confirmation between agent phases",
+)
 def scan(
     target: str,
     scan_mode: str,
@@ -117,6 +136,7 @@ def scan(
     verbose: bool,
     mock_tools: bool,
     instruction: str,
+    confirm: bool,
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -126,9 +146,9 @@ def scan(
     """
     # Setup logging
     if log_file:
-        log_path = setup_logging(Path(log_file))
+        log_path = setup_logging(Path(log_file), verbose=verbose)
     else:
-        log_path = setup_logging()
+        log_path = setup_logging(verbose=verbose)
 
     # Print startup lines
     click.echo(f"📋 Strix Non-Interactive Scanner")
@@ -217,6 +237,7 @@ def scan(
             run_config=run_config,
             agents=agents,
             sandbox_client=sandbox_client,
+            confirm_proceed=_make_confirm_callback() if confirm else None,
         )
 
         click.echo(f"✅ Initialized {len(agents)} agent roles")
@@ -224,7 +245,18 @@ def scan(
     except Exception as e:
         click.echo(f"❌ Failed to initialize agents: {e}", err=True)
         logger.error(f"Agent initialization error: {e}", exc_info=True)
+        if runtime is not None:
+            runtime.cleanup()
         sys.exit(1)
+
+    # Register signal handler for emergency cleanup before starting the scan
+    if runtime is not None:
+        def _signal_cleanup(signum, frame):
+            runtime.cleanup()
+            sys.exit(1)
+
+        signal.signal(signal.SIGTERM, _signal_cleanup)
+        signal.signal(signal.SIGINT, _signal_cleanup)
 
     # Run orchestrator
     try:
@@ -243,6 +275,20 @@ def scan(
 
     # Print final summary
     _print_final_summary(state)
+
+
+def _make_confirm_callback():
+    """Return a callback that prints a phase summary and prompts the user to continue."""
+
+    def confirm_proceed(completed_role: str, next_role: str, snippet: str, vuln_count: int) -> bool:
+        click.echo(f"\n{'─' * 60}")
+        click.echo(f"✅ {completed_role} complete — {vuln_count} vulnerabilities found so far")
+        if snippet:
+            click.echo(f"\n{snippet}{'...' if len(snippet) == 300 else ''}")
+        click.echo("")
+        return click.confirm(f"Proceed to {next_role}?", default=True)
+
+    return confirm_proceed
 
 
 def _register_strix_tools(tool_registry) -> None:
@@ -299,6 +345,7 @@ def _build_agents(
         Dict of role -> Agent[StrixDeps, Any]
     """
     from pydantic_ai import Agent
+    from strix_pydantic.agents.types import AgentOutput
     from strix_pydantic.tools.tool_wrapper import build_tools_from_registry
 
     agents = {}
@@ -318,15 +365,22 @@ def _build_agents(
             context="parent",
         )
 
-        # Build registry toolset with sandbox dispatch if tools are registered
+        # Build registry toolset — direct callables for mock mode, sandbox dispatch for real mode
         registry_toolset = None
-        if tool_registry and len(tool_registry._tools) > 0 and sandbox_client:
-            registry_toolset = build_tools_from_registry(
-                tool_registry,
-                sandbox_client=sandbox_client,
-                agent_id=role,
-            )
-            logger.info(f"Built sandbox toolset for {role} with {len(tool_registry._tools)} tools")
+        if tool_registry and len(tool_registry._tools) > 0:
+            if sandbox_client:
+                registry_toolset = build_tools_from_registry(
+                    tool_registry,
+                    sandbox_client=sandbox_client,
+                    agent_id=role,
+                )
+                logger.info(f"Built sandbox toolset for {role} with {len(tool_registry._tools)} tools")
+            else:
+                from pydantic_ai import FunctionToolset
+
+                parent_tools = tool_registry.get_tools_for_context("parent")
+                registry_toolset = FunctionToolset(tools=[td.callable for td in parent_tools.values()])
+                logger.info(f"Built direct toolset for {role} with {len(parent_tools)} mock tools")
 
         # Build agent with skill-derived instructions and model spec
         # Include both skill toolset and registry toolset if available
@@ -336,6 +390,7 @@ def _build_agents(
 
         agent = Agent(
             model_spec,
+            output_type=AgentOutput,
             instructions=skill_build.instructions,
             toolsets=toolsets,
         )

@@ -28,8 +28,16 @@ def resolve_model_config() -> tuple[str, str]:
     if os.getenv("ANTHROPIC_API_KEY"):
         return "anthropic:claude-haiku-4-5", "claude-haiku-4-5"
 
-    # Sensible fallback: Claude Haiku (prefers Anthropic)
-    return "anthropic:claude-haiku-4-5", "claude-haiku-4-5 (default)"
+    if os.getenv("OPENAI_API_KEY"):
+        return "openai:gpt-4o-mini", "gpt-4o-mini"
+
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return "google-gla:gemini-3.5-flash", "gemini-3.5-flash"
+
+    raise ValueError(
+        "No LLM API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY. "
+        "Or specify a model explicitly with --model or STRIX_LLM."
+    )
 
 
 def normalize_model_spec(model_spec: str) -> str:

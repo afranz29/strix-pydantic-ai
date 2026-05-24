@@ -1,9 +1,25 @@
 """Shared types for graph orchestration and agent execution."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Literal, Optional
 
+from pydantic import BaseModel
 from pydantic_ai import Agent, ModelMessage
+
+
+class Vulnerability(BaseModel):
+    title: str
+    severity: Literal["critical", "high", "medium", "low", "info"]
+    description: str
+    cve_id: str | None = None
+    parameter: str | None = None
+    poc: str | None = None
+
+
+class AgentOutput(BaseModel):
+    summary: str
+    vulnerabilities: list[Vulnerability] = []
+    notes: list[str] = []
 
 
 @dataclass
@@ -66,6 +82,9 @@ class StrixDeps:
     run_config: RunConfig
     agents: dict[str, Agent[Any, Any]]  # Pre-constructed Agent[StrixDeps, ...] per role
     sandbox_client: Any = None  # SandboxClient instance, initialized in orchestrator
+
+    # Called between roles: (completed_role, next_role, summary_snippet, vuln_count) -> bool
+    confirm_proceed: Optional[Callable[[str, str, str, int], bool]] = None
 
     # Optional context for tracking
     parent_context: dict[str, Any] = field(default_factory=dict)

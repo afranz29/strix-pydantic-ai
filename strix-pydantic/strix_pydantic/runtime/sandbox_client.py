@@ -207,12 +207,12 @@ class SandboxClient:
         if status_code == 404:
             try:
                 resp = ToolExecutionResponse.model_validate_json(error.response.content)
-                if resp.error and resp.error.code == "tool_not_found":
+                if resp.error:
                     return SandboxToolResult(
                         ok=False,
                         result=None,
                         error_code="tool_not_found",
-                        error_message=resp.error.message,
+                        error_message=resp.error,
                         retriable=False,
                     )
             except Exception:

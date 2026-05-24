@@ -72,7 +72,7 @@ def _create_sandbox_wrapper(
     # Get docstring and annotations from original for pydantic-ai introspection
     async def sandbox_wrapper(**kwargs) -> Any:
         """Execute tool through sandbox."""
-        logger.info(f"🔧 [SANDBOX] Dispatching {tool_name} with args: {list(kwargs.keys())}")
+        logger.info(f"🔧 [SANDBOX] Dispatching {tool_name} kwargs={kwargs}")
 
         # Unique call ID prevents parallel tool calls from cancelling each other.
         # The sandbox cancels previous tasks per agent_id, so each call needs a unique id.
