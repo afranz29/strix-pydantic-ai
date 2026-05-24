@@ -39,6 +39,8 @@ Active development is ongoing on the `goport` branch. Current status:
 
 ✅ **Completed:**
 - Core agent framework and agentic loop
+- Context-aware tool filtering (Sandbox vs. Parent context)
+- Robust XML schema parsing for tool definitions
 - Per-agent logging and state persistence
 - High-performance Terminal UI (scrolling, log sanitization, real-time tailing)
 - Essential security tools (HTTP proxy, browser automation, terminal shells, Python runtime)

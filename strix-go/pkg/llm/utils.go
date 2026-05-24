@@ -31,6 +31,8 @@ func NormalizeToolFormat(content string) string {
 
 func ParseToolInvocations(content string) []ToolInvocation {
 	content = NormalizeToolFormat(content)
+	// Sanitize malformed XML from models like sonnet-4-6 that add escaped quotes to parameter/function names
+	content = sanitizeXMLNames(content)
 
 	var invs []ToolInvocation
 
@@ -63,4 +65,23 @@ func ParseToolInvocations(content string) []ToolInvocation {
 	}
 
 	return invs
+}
+
+// sanitizeXMLNames fixes malformed XML where parameter/function names have escaped quotes appended.
+// Example: <parameter=command"> → <parameter=command>
+// This handles a quirk in Claude-sonnet-4-6 XML generation.
+func sanitizeXMLNames(content string) string {
+	// Fix function names with trailing escaped quotes: <function=name"> → <function=name>
+	content = regexp.MustCompile(`(<function=)([^\s>]+)(")\s*>`).ReplaceAllString(content, `$1$2>`)
+
+	// Fix parameter names with trailing escaped quotes: <parameter=name"> → <parameter=name>
+	content = regexp.MustCompile(`(<parameter=)([^\s>]+)(")\s*>`).ReplaceAllString(content, `$1$2>`)
+
+	// Fix closing parameter tags with malformed quotes: </parameter"> → </parameter>
+	content = regexp.MustCompile(`</parameter(")?>`).ReplaceAllString(content, `</parameter>`)
+
+	// Fix closing function tags with malformed quotes: </function"> → </function>
+	content = regexp.MustCompile(`</function(")?>`).ReplaceAllString(content, `</function>`)
+
+	return content
 }

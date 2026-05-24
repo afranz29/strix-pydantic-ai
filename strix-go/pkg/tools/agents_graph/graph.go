@@ -107,6 +107,7 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 
 			if choice == "q" {
 				StepReviewMutex.Unlock()
+				printQuitSummary()
 				os.Exit(0)
 			} else if choice == "c" {
 				ReviewAgents = false
@@ -231,7 +232,14 @@ func CreateAgent(args map[string]interface{}) (interface{}, error) {
 	if SpawnAgentFunc != nil {
 		fn := SpawnAgentFunc
 		go func() {
-			_ = fn(context.Background(), parentID, childID, name, task, skills)
+			var spawnErr error
+			defer func() {
+				if r := recover(); r != nil {
+					spawnErr = fmt.Errorf("agent panicked: %v", r)
+				}
+				notifyParentOfChildCrash(childID, parentID, name, spawnErr)
+			}()
+			spawnErr = fn(context.Background(), parentID, childID, name, task, skills)
 		}()
 	} else {
 		return map[string]interface{}{"success": false, "error": "Spawn agent hook is not configured"}, nil
@@ -365,7 +373,7 @@ func WaitForMessage(args map[string]interface{}) (interface{}, error) {
 			"content": msg.Content,
 		}, nil
 
-	case <-time.After(10 * time.Minute):
+	case <-time.After(2 * time.Minute):
 		GraphLock.Lock()
 		node.Status = "running"
 		node.WaitingReason = ""
@@ -439,6 +447,7 @@ func AgentFinish(args map[string]interface{}) (interface{}, error) {
 
 			if choice == "q" {
 				StepReviewMutex.Unlock()
+				printQuitSummary()
 				os.Exit(0)
 			} else if choice == "c" {
 				ReviewAgents = false
@@ -616,6 +625,63 @@ func enqueueMessageLocked(targetNode *AgentNode, message AgentMessage) bool {
 	}
 }
 
+func notifyParentOfChildCrash(childID, parentID, childName string, err error) {
+	GraphLock.Lock()
+	defer GraphLock.Unlock()
+
+	node, exists := AgentNodes[childID]
+	if !exists {
+		return
+	}
+	// Agent finished normally via agent_finish — nothing to do
+	if node.Status == "finished" || node.Status == "failed" {
+		return
+	}
+
+	node.Status = "failed"
+	node.FinishedAt = time.Now().UTC()
+
+	if parentID == "" {
+		return
+	}
+	parentNode, pExists := AgentNodes[parentID]
+	if !pExists {
+		return
+	}
+
+	var reason string
+	if err != nil {
+		reason = fmt.Sprintf("error: %v", err)
+	} else {
+		reason = "agent exited without completing its task (iteration budget exceeded or context cancelled)"
+	}
+
+	slog.Error("Child agent exited without completing, notifying parent",
+		slog.String("child_id", childID),
+		slog.String("parent_id", parentID),
+		slog.String("reason", reason),
+	)
+
+	messageID := fmt.Sprintf("crash_%d", time.Now().UnixNano()/1e6%1000000)
+	message := AgentMessage{
+		ID:       messageID,
+		From:     childID,
+		To:       parentID,
+		Content: fmt.Sprintf(
+			"<inter_agent_message>\nAgent Identity:\n- ID: %s\n- Name: %s\n\n"+
+				"Notification: This agent exited unexpectedly (%s). "+
+				"Any task delegated to it has failed. Please handle the failure and continue the assessment.\n"+
+				"</inter_agent_message>",
+			childID, childName, reason,
+		),
+		MsgType:   "information",
+		Priority:  "high",
+		Timestamp: time.Now().UTC(),
+	}
+
+	enqueueMessageLocked(parentNode, message)
+}
+
 func interfaceSliceToStrings(raw interface{}) []string {
 	switch value := raw.(type) {
 	case []string:
@@ -682,4 +748,85 @@ func formatCompletionReport(
 		findingsXML.String(),
 		recommendationsXML.String(),
 	)
+}
+
+func printQuitSummary() {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("🛑 SCAN INTERRUPTED - PARTIAL SUMMARY")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println()
+
+	// Agent status summary
+	GraphLock.RLock()
+	totalAgents := len(AgentNodes)
+	finishedCount := 0
+	failedCount := 0
+	runningCount := 0
+	for _, node := range AgentNodes {
+		switch node.Status {
+		case "finished":
+			finishedCount++
+		case "failed":
+			failedCount++
+		case "running", "waiting":
+			runningCount++
+		}
+	}
+	GraphLock.RUnlock()
+
+	fmt.Printf("📊 Agents:\n")
+	fmt.Printf("   Total:     %d\n", totalAgents)
+	fmt.Printf("   Completed: %d\n", finishedCount)
+	fmt.Printf("   Failed:    %d\n", failedCount)
+	fmt.Printf("   Running:   %d\n", runningCount)
+	fmt.Println()
+
+	// Agent tree
+	fmt.Println("📈 Agent Hierarchy:")
+	printAgentTree(RootAgentID, 0)
+	fmt.Println()
+
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("✅ Partial scan summary saved to run directory")
+	fmt.Println()
+}
+
+func printAgentTree(agentID string, depth int) {
+	if agentID == "" {
+		return
+	}
+
+	GraphLock.RLock()
+	node, exists := AgentNodes[agentID]
+	GraphLock.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	indent := strings.Repeat("   ", depth)
+	statusIcon := "⏳"
+	switch node.Status {
+	case "finished":
+		statusIcon = "✅"
+	case "failed":
+		statusIcon = "❌"
+	case "running":
+		statusIcon = "▶️ "
+	case "waiting":
+		statusIcon = "⏸️ "
+	}
+
+	fmt.Printf("%s%s %s [%s]\n", indent, statusIcon, node.Name, node.Status)
+
+	// Find and print children
+	GraphLock.RLock()
+	for _, childNode := range AgentNodes {
+		if childNode.ParentID == agentID {
+			GraphLock.RUnlock()
+			printAgentTree(childNode.ID, depth+1)
+			GraphLock.RLock()
+		}
+	}
+	GraphLock.RUnlock()
 }

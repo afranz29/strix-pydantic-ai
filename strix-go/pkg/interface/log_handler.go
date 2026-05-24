@@ -46,7 +46,14 @@ func NewStrixLogHandler(logDir string, writeStdout bool) (*StrixLogHandler, erro
 		return nil, fmt.Errorf("failed to open agent log: %w", err)
 	}
 
-	logOpts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	// Determine log level from STRIX_LOG_LEVEL env var, default to debug
+	logLevel := slog.LevelDebug
+	if levelStr := os.Getenv("STRIX_LOG_LEVEL"); levelStr != "" {
+		if err := logLevel.UnmarshalText([]byte(levelStr)); err == nil {
+			// Successfully parsed custom level
+		}
+	}
+	logOpts := &slog.HandlerOptions{Level: logLevel}
 
 	return &StrixLogHandler{
 		systemLog: slog.NewTextHandler(sf, logOpts),

@@ -87,6 +87,9 @@ agent_runs/
 *.log
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 .directory
 *.bak
 *.tmp
@@ -102,6 +105,9 @@ schema.graphql
 # Go
 strix-go/bin/
 strix-go/strix
+strix-cli
+strix-go-bin
+strix/strix
 
 # Antigravity CLI
 .antigravitycli/

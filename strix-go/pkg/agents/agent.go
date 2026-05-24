@@ -113,19 +113,47 @@ const (
 
 // validateToolAvailability checks that all requested skills/tools exist and are
 // available in the given execution context. Skips special skills like root_agent
-// that are bootstrap skills, not actual tools.
+// that are bootstrap skills, not actual tools. Also allows sandbox binaries that
+// aren't formally registered as tools (e.g., nmap, ffuf, nuclei).
 func validateToolAvailability(skills []string, ctx tools.ExecutionContext) error {
 	// Special skills that don't need to be validated as tools
 	specialSkills := map[string]bool{
 		"root_agent": true, // Bootstrap skill for root agent
 	}
 
+	// Sandbox binaries that exist but aren't formally registered as Go tools.
+	// These are CLI tools available in the sandbox that agents can call via terminal_execute.
+	sandboxBinaries := map[string]bool{
+		// Skills/roles
+		"recon":      true, // Reconnaissance skill
+		// CLI tools
+		"nmap":       true, // Network mapping
+		"httpx":      true, // HTTP probe
+		"nuclei":     true, // Vuln scanner
+		"subfinder":  true, // Subdomain enum
+		"naabu":      true, // Port scanner
+		"ffuf":       true, // Fuzzer
+		"katana":     true, // Crawler
+		"gospider":   true, // Crawler
+		"sqlmap":     true, // SQLi scanner
+		"nikto":      true, // Web scanner
+		"wapiti":     true, // Web scanner
+		"zaproxy":    true, // Web proxy
+		"trivy":      true, // Vuln scanner
+		"dirsearch":  true, // Directory search
+		"arjun":      true, // Parameter finder
+		"trufflesecurity": true, // Secret scanner
+		"wafw00f":    true, // WAF detector
+		"retire":     true, // Dependency checker
+		"semgrep":    true, // Code scanner
+	}
+
 	var missing []string
 	var unavailable []string
 
 	for _, skill := range skills {
-		// Skip special bootstrap skills
-		if specialSkills[skill] {
+		// Skip special bootstrap skills and known sandbox binaries
+		if specialSkills[skill] || sandboxBinaries[skill] {
 			continue
 		}
 
@@ -428,16 +456,31 @@ func SpawnAgent(ctx context.Context, parentID, childID, childName, task string, 
 	}
 
 	cfg := getRunConfig()
-	history := []llm.Message{}
-	agents_graph.GraphLock.RLock()
-	if node, exists := agents_graph.AgentNodes[childID]; exists && len(node.InitialHistory) > 0 {
-		history = cloneHistory(node.InitialHistory)
+
+	// Try to resume from persisted history (keyed by agent ID).
+	// The root agent always has id "agent_root" so it resumes across restarts.
+	// Sub-agents receive unique ids per spawn, so they always start fresh here.
+	history := loadHistory(agentCtx, childID)
+	resumed := len(history) > 0
+	if resumed {
+		slog.Info("Resuming agent from persisted history",
+			slog.String("agent_id", childID),
+			slog.Int("messages", len(history)),
+		)
+	} else {
+		// Fresh start — inherit parent context if available.
+		agents_graph.GraphLock.RLock()
+		if node, exists := agents_graph.AgentNodes[childID]; exists && len(node.InitialHistory) > 0 {
+			history = cloneHistory(node.InitialHistory)
+		}
+		agents_graph.GraphLock.RUnlock()
+		if len(history) == 0 {
+			history = []llm.Message{}
+		}
+		taskMsg := llm.Message{Role: "user", Content: fmt.Sprintf("Your core task is: %s", task)}
+		history = append(history, taskMsg)
+		persistMessage(agentCtx, childID, taskMsg)
 	}
-	agents_graph.GraphLock.RUnlock()
-	if len(history) == 0 {
-		history = []llm.Message{}
-	}
-	history = append(history, llm.Message{Role: "user", Content: fmt.Sprintf("Your core task is: %s", task)})
 
 	agent := &Agent{
 		ID:               childID,
@@ -625,18 +668,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		)
 
 		// Record assistant thought/tool call to history
-		a.History = append(a.History, llm.Message{Role: "assistant", Content: completion})
-		a.syncConversationHistory()
+		a.appendHistory(ctx, llm.Message{Role: "assistant", Content: completion})
 
 		// 3. Parse XML tool invocations
 		toolCalls := llm.ParseToolInvocations(completion)
 		if len(toolCalls) == 0 {
 			// If LLM did not execute tools, add fallback warning user message
-			a.History = append(a.History, llm.Message{
+			a.appendHistory(ctx, llm.Message{
 				Role:    "user",
 				Content: "You did not make any tool calls. If you are finished, invoke agent_finish (for sub-agents) or finish_scan (for root agent). Otherwise, execute a valid tool call to proceed.",
 			})
-			a.syncConversationHistory()
 			continue
 		}
 
@@ -657,7 +698,7 @@ func (a *Agent) Run(ctx context.Context) error {
 					slog.String("tool_name", call.ToolName),
 				)
 				obs := fmt.Sprintf("<observation>\nError: Tool '%s' is not registered in the system.\n</observation>", call.ToolName)
-				a.History = append(a.History, llm.Message{Role: "user", Content: obs})
+				a.appendHistory(ctx, llm.Message{Role: "user", Content: obs})
 				continue
 			}
 
@@ -738,8 +779,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 
 			// Add observation back to history
-			a.History = append(a.History, llm.Message{Role: "user", Content: observation})
-			a.syncConversationHistory()
+			a.appendHistory(ctx, llm.Message{Role: "user", Content: observation})
 		}
 	}
 
@@ -754,6 +794,14 @@ func (a *Agent) syncConversationHistory() {
 	if node, exists := agents_graph.AgentNodes[a.ID]; exists {
 		node.ConversationHistory = cloneHistory(a.History)
 	}
+}
+
+// appendHistory appends msg to the in-memory history, persists it to sqlite,
+// and syncs the agents_graph node — all in one call.
+func (a *Agent) appendHistory(ctx context.Context, msg llm.Message) {
+	a.History = append(a.History, msg)
+	persistMessage(ctx, a.ID, msg)
+	a.syncConversationHistory()
 }
 
 func cloneHistory(history []llm.Message) []llm.Message {
