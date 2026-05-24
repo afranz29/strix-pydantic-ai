@@ -193,7 +193,8 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 RUN mkdir -p /workspace && chown -R pentester:pentester /workspace /app
 
-COPY pyproject.toml uv.lock ./
+COPY junk/pyproject.toml pyproject.toml
+COPY junk/uv.lock uv.lock
 RUN echo "# Sandbox Environment" > README.md && mkdir -p strix && touch strix/__init__.py
 
 USER pentester

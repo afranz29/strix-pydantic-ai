@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Strix non-interactive orchestrator using Pydantic AI and Pydantic Graph"
 requires-python = ">=3.11"
 dependencies = [
+    "docker>=7.1.0",
     "pydantic-ai>=1.0",
     "pydantic-graph>=1.0",
     "pydantic>=2.0",

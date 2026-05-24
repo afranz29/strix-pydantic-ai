@@ -12,6 +12,7 @@ import click
 from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
+from strix_pydantic.runtime.bootstrap import initialize_sandbox
 from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
 from strix_pydantic.tools.tool_registry import ToolRegistry
 
@@ -74,8 +75,8 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
 @click.option(
     "--sandbox-url",
     type=str,
-    default="http://127.0.0.1:8000",
-    help="URL of sandbox server",
+    default=None,
+    help="URL of an existing sandbox server. If omitted, Strix creates a Docker sandbox.",
 )
 @click.option(
     "--timeout",
@@ -167,29 +168,39 @@ def scan(
         execute_timeout=timeout,
     )
 
+    runtime = None
+    sandbox_info = None
+    sandbox_client = None
+
     # Build agents and dependencies
     try:
         from strix_pydantic.runtime.sandbox_client import SandboxClient
 
         tool_registry = ToolRegistry()
 
-        # Create sandbox client for tool execution
-        import os
-        auth_token = os.getenv("STRIX_SANDBOX_TOKEN", "secret123")
-
-        sandbox_client = SandboxClient(
-            base_url=sandbox_url,
-            auth_token=auth_token,
-            execute_timeout=run_config.execute_timeout,
-        )
-
         # Register mock tools if requested
         if mock_tools:
             from strix_pydantic.tools.mock_tools import register_mock_tools
+
             click.echo("📦 Using mock tools (testing mode)")
             register_mock_tools(tool_registry)
+            sandbox_url = sandbox_url or "http://127.0.0.1:48081"
+            sandbox_client = None
         else:
-            click.echo(f"🐳 Using Docker sandbox at {sandbox_url}")
+            sandbox_url, auth_token, runtime, sandbox_info = asyncio.run(
+                initialize_sandbox(run_id, sandbox_url)
+            )
+            sandbox_client = SandboxClient(
+                base_url=sandbox_url,
+                auth_token=auth_token,
+                execute_timeout=run_config.execute_timeout,
+            )
+            if sandbox_info is None:
+                click.echo(f"🐳 Using external sandbox at {sandbox_url}")
+            else:
+                click.echo(f"🐳 Created Docker sandbox at {sandbox_url}")
+
+        if not mock_tools:
             _register_strix_tools(tool_registry)
 
         agents = _build_agents(
@@ -223,6 +234,12 @@ def scan(
         click.echo(f"❌ Scan failed: {e}", err=True)
         logger.error(f"Orchestrator error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        if runtime and sandbox_info:
+            try:
+                asyncio.run(runtime.destroy_sandbox(sandbox_info["workspace_id"]))
+            except Exception as e:
+                logger.warning("Failed to destroy sandbox: %s", e, exc_info=True)
 
     # Print final summary
     _print_final_summary(state)

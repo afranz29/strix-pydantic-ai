@@ -16,7 +16,7 @@ def resolve_model_config() -> tuple[str, str]:
     Priority (matches Go implementation):
     1. STRIX_LLM env var (if set, exact model string)
     2. ANTHROPIC_API_KEY set → "claude-haiku-4-5"
-    3. Fallback → "gemini-3.5-flash"
+    3. Fallback → "claude-haiku-4-5" (Anthropic default, sensible fallback)
     """
     model_override = os.getenv("STRIX_LLM", "").strip()
 
@@ -26,10 +26,10 @@ def resolve_model_config() -> tuple[str, str]:
         return normalized, model_override
 
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-haiku-4-5", "claude-haiku-4-5 (Anthropic)"
+        return "anthropic:claude-haiku-4-5", "claude-haiku-4-5"
 
-    # Fallback to Gemini (same as Go implementation)
-    return "gemini:gemini-3.5-flash", "gemini-3.5-flash (Google)"
+    # Sensible fallback: Claude Haiku (prefers Anthropic)
+    return "anthropic:claude-haiku-4-5", "claude-haiku-4-5 (default)"
 
 
 def normalize_model_spec(model_spec: str) -> str:
