@@ -1,5 +1,6 @@
 """Pydantic Graph orchestrator for non-interactive scans."""
 
+import json
 import logging
 from typing import Any
 
@@ -10,8 +11,60 @@ from .types import RunConfig, StrixDeps, StrixRunState
 logger = logging.getLogger(__name__)
 
 
+def _dump_for_log(value: Any) -> str:
+    """Return a stable string representation for debug logs."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, default=str, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _log_message_sequence(role: str, messages: list[Any], label: str) -> None:
+    """Log full message sequence with all parts for LLM traceability."""
+    logger.debug(f"🧾 [LLM TRACE] role={role} {label}: {len(messages)} message(s)")
+
+    for msg_idx, msg in enumerate(messages, 1):
+        msg_type = type(msg).__name__
+        msg_kind = getattr(msg, "kind", None)
+        timestamp = getattr(msg, "timestamp", None)
+
+        logger.debug(
+            f"   [msg {msg_idx}] type={msg_type}, kind={msg_kind}, timestamp={timestamp}"
+        )
+
+        parts = getattr(msg, "parts", []) or []
+        if not parts:
+            logger.debug(f"      [no-parts] {_dump_for_log(msg)}")
+            continue
+
+        for part_idx, part in enumerate(parts, 1):
+            part_kind = getattr(part, "part_kind", None)
+
+            if part_kind == "tool-call":
+                tool_name = getattr(part, "tool_name", "unknown")
+                args = getattr(part, "args", None)
+                logger.debug(
+                    f"      [part {part_idx}] tool-call name={tool_name}, args={_dump_for_log(args)}"
+                )
+            elif part_kind == "tool-return":
+                tool_name = getattr(part, "tool_name", "unknown")
+                content = getattr(part, "content", None)
+                logger.debug(
+                    f"      [part {part_idx}] tool-return name={tool_name}, content={_dump_for_log(content)}"
+                )
+            elif part_kind in {"text", "thinking", "system-prompt", "user-prompt"}:
+                content = getattr(part, "content", None)
+                logger.debug(f"      [part {part_idx}] {part_kind}: {_dump_for_log(content)}")
+            else:
+                logger.debug(
+                    f"      [part {part_idx}] kind={part_kind}, raw={_dump_for_log(part)}"
+                )
+
+
 def _log_agent_result(role: str, result: Any) -> None:
-    """Log token usage at INFO and full message sequence at DEBUG."""
+    """Log token usage and full LLM message sequence."""
     usage = result.usage
     logger.debug(
         f"   Tokens — input: {usage.input_tokens or 0}, "
@@ -20,17 +73,7 @@ def _log_agent_result(role: str, result: Any) -> None:
         f"cache_write: {usage.cache_write_tokens or 0}"
     )
 
-    for msg in result.all_messages():
-        for part in getattr(msg, "parts", []):
-            kind = getattr(part, "part_kind", None)
-            if kind == "tool-call":
-                logger.debug(f"   [tool-call] {part.tool_name}({str(part.args)[:200]})")
-            elif kind == "tool-return":
-                logger.debug(f"   [tool-return] {part.tool_name} → {str(part.content)[:200]}")
-            elif kind == "text" and part.content:
-                logger.debug(f"   [text] {part.content[:300]}")
-            elif kind == "thinking" and part.content:
-                logger.debug(f"   [thinking] {part.content[:300]}")
+    _log_message_sequence(role, result.all_messages(), label="all_messages")
 
 
 def build_orchestrator_graph() -> Any:
@@ -114,6 +157,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         state.iteration += 1
         agent = deps.agents[role]
         logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
+        state.agent_statuses[role] = "running"
 
         # Build prompt — inject prior role outputs as context
         base = f"Target: {state.target}. " + (
@@ -127,13 +171,18 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         else:
             prompt = base
 
+        history = state.message_history.get(role, [])
+        logger.debug(f"📝 [LLM INPUT] role={role} user_prompt={prompt}")
+        _log_message_sequence(role, history, label="message_history_before_run")
+
         try:
             result = await agent.run(
                 user_prompt=prompt,
-                message_history=state.message_history.get(role, []),
+                message_history=history,
                 deps=deps,
             )
         except Exception as e:
+            state.agent_statuses[role] = "failed"
             logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
             state.error = f"Agent execution error: {e}"
             return End(f"Aborted: {state.error}")

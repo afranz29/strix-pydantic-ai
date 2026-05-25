@@ -55,7 +55,7 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     console_handler.addFilter(_StrixFilter())
-    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)  # INFO by default
+    console_handler.setLevel(logging.DEBUG)  # DEBUG by default
     root_logger.addHandler(console_handler)
 
     return log_file
@@ -229,6 +229,7 @@ def scan(
             run_config,
             tool_registry,
             sandbox_client=sandbox_client,
+            run_state=state,
         )
 
         deps = StrixDeps(
@@ -249,11 +250,14 @@ def scan(
             runtime.cleanup()
         sys.exit(1)
 
+    interrupted = False
+    exit_code = 0
+
     # Register signal handler for emergency cleanup before starting the scan
     if runtime is not None:
         def _signal_cleanup(signum, frame):
             runtime.cleanup()
-            sys.exit(1)
+            raise KeyboardInterrupt
 
         signal.signal(signal.SIGTERM, _signal_cleanup)
         signal.signal(signal.SIGINT, _signal_cleanup)
@@ -262,10 +266,16 @@ def scan(
     try:
         click.echo(f"\n🚀 Starting scan for {target}")
         _run_orchestrator(state, deps, verbose)
+    except KeyboardInterrupt:
+        interrupted = True
+        state.error = state.error or "Interrupted by user"
+        click.echo("\n⏹  Scan interrupted. Summarizing findings collected so far...")
+        logger.info("Scan interrupted by user")
     except Exception as e:
         click.echo(f"❌ Scan failed: {e}", err=True)
         logger.error(f"Orchestrator error: {e}", exc_info=True)
-        sys.exit(1)
+        state.error = state.error or f"Scan failed: {e}"
+        exit_code = 1
     finally:
         if runtime and sandbox_info:
             try:
@@ -275,6 +285,10 @@ def scan(
 
     # Print final summary
     _print_final_summary(state)
+    if interrupted:
+        sys.exit(130)
+    if exit_code:
+        sys.exit(exit_code)
 
 
 def _make_confirm_callback():
@@ -330,6 +344,7 @@ def _build_agents(
     run_config: RunConfig,
     tool_registry: Optional[Any] = None,
     sandbox_client: Optional[Any] = None,
+    run_state: Optional[StrixRunState] = None,
 ) -> dict[str, Any]:
     """
     Build Agent instances for each role with sandbox tool dispatch.
@@ -340,6 +355,7 @@ def _build_agents(
         run_config: Run configuration
         tool_registry: Optional ToolRegistry with registered tools
         sandbox_client: SandboxClient instance for tool execution
+        run_state: Mutable run state for incremental tool-observation capture
 
     Returns:
         Dict of role -> Agent[StrixDeps, Any]
@@ -368,11 +384,52 @@ def _build_agents(
         # Build registry toolset — direct callables for mock mode, sandbox dispatch for real mode
         registry_toolset = None
         if tool_registry and len(tool_registry._tools) > 0:
+
+            def _record_tool_event(event: dict[str, Any], current_role: str = role) -> None:
+                if run_state is None:
+                    return
+
+                kwargs = event.get("kwargs") if isinstance(event.get("kwargs"), dict) else {}
+                result_payload = event.get("result")
+
+                observation: dict[str, Any] = {
+                    "role": current_role,
+                    "tool": event.get("tool_name", "unknown"),
+                    "ok": bool(event.get("ok")),
+                }
+
+                if "command" in kwargs:
+                    observation["command"] = kwargs.get("command")
+
+                if isinstance(result_payload, dict):
+                    for field in ("status", "exit_code", "terminal_id", "working_dir"):
+                        if field in result_payload:
+                            observation[field] = result_payload[field]
+
+                    content = result_payload.get("content")
+                    if isinstance(content, str) and content.strip():
+                        observation["content_preview"] = content.strip()[:300]
+
+                    result_error = result_payload.get("error")
+                    if result_error:
+                        observation["error"] = str(result_error)
+
+                if not observation["ok"]:
+                    observation["error_code"] = event.get("error_code")
+                    if event.get("error_message"):
+                        observation["error"] = event.get("error_message")
+
+                # Keep memory bounded for long-running scans.
+                if len(run_state.tool_observations) >= 500:
+                    run_state.tool_observations.pop(0)
+                run_state.tool_observations.append(observation)
+
             if sandbox_client:
                 registry_toolset = build_tools_from_registry(
                     tool_registry,
                     sandbox_client=sandbox_client,
                     agent_id=role,
+                    on_tool_event=_record_tool_event,
                 )
                 logger.info(f"Built sandbox toolset for {role} with {len(tool_registry._tools)} tools")
             else:
@@ -388,19 +445,29 @@ def _build_agents(
         if registry_toolset:
             toolsets.append(registry_toolset)
 
+        # Configure safety settings for Gemini models to prevent refusals during security scans
+        model_settings = {}
+        if "google" in model_spec or "gemini" in model_spec:
+            model_settings["google_safety_settings"] = [
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+            ]
+
         agent = Agent(
             model_spec,
             output_type=AgentOutput,
             instructions=skill_build.instructions,
             toolsets=toolsets,
+            model_settings=model_settings,
         )
 
         agents[role] = agent
         logger.info(f"Built agent for role: {role} with model {model_spec}")
 
     return agents
-
-
 def _run_orchestrator(
     state: StrixRunState,
     deps: StrixDeps,
@@ -481,6 +548,39 @@ def _print_final_summary(state: StrixRunState) -> None:
             severity = vuln.get("severity", "unknown")
             click.echo(f"   {i}. {title} ({severity})")
 
+    if state.tool_observations:
+        total_observations = len(state.tool_observations)
+        max_to_show = 20
+        observations_to_show = state.tool_observations[-max_to_show:]
+
+        click.echo(f"\n🔧 [TOOL OBSERVATIONS ({total_observations})]")
+        if total_observations > max_to_show:
+            click.echo(f"   Showing last {max_to_show} observations")
+
+        start_index = total_observations - len(observations_to_show) + 1
+        for idx, obs in enumerate(observations_to_show, start=start_index):
+            role = obs.get("role", "unknown")
+            tool = obs.get("tool", "unknown")
+            status = obs.get("status") or ("ok" if obs.get("ok") else "error")
+            exit_code = obs.get("exit_code")
+
+            line = f"   {idx}. [{role}] {tool} status={status}"
+            if exit_code is not None:
+                line += f", exit_code={exit_code}"
+            click.echo(line)
+
+            command = obs.get("command")
+            if command:
+                click.echo(f"      cmd: {str(command)[:180]}")
+
+            preview = obs.get("content_preview")
+            if preview:
+                click.echo(f"      out: {str(preview).replace(chr(10), ' ')[:180]}")
+
+            error = obs.get("error")
+            if error:
+                click.echo(f"      err: {str(error)[:180]}")
+
     if state.notes:
         click.echo(f"\n📝 [NOTES & FINDINGS ({len(state.notes)})]")
         for i, note in enumerate(state.notes, 1):
@@ -494,7 +594,5 @@ def _print_final_summary(state: StrixRunState) -> None:
         click.echo(f"✅ Scan completed successfully")
         click.echo(f"   Run ID: {state.run_id}")
         click.echo(f"   Total iterations: {state.iteration}")
-
-
 if __name__ == "__main__":
     scan()
