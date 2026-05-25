@@ -372,7 +372,13 @@ def _build_agents(
 
     for role in roles:
         # Get skills for this role
-        role_skills = skill_list if skill_list else []
+        role_skills = skill_list.copy() if skill_list else []
+
+        # Automatically append the selected scan mode methodology as a skill
+        # (parity with core strix/llm/llm.py)
+        scan_mode_skill = f"scan_modes/{run_config.scan_mode}"
+        if scan_mode_skill not in role_skills:
+            role_skills.append(scan_mode_skill)
 
         # Build skill capability
         skill_build = skill_factory.build_for_role(
@@ -445,8 +451,16 @@ def _build_agents(
         if registry_toolset:
             toolsets.append(registry_toolset)
 
-        # Configure safety settings for Gemini models to prevent refusals during security scans
+        # Configure settings for the model
         model_settings = {}
+
+        # Set reasoning effort based on scan mode (parity with core strix)
+        if run_config.scan_mode == "quick":
+            model_settings["reasoning_effort"] = "medium"
+        else:
+            model_settings["reasoning_effort"] = "high"
+
+        # Configure safety settings for Gemini models to prevent refusals during security scans
         if "google" in model_spec or "gemini" in model_spec:
             model_settings["google_safety_settings"] = [
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
