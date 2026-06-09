@@ -18,10 +18,14 @@ dependencies = [
     "defusedxml>=0.7.1",
     "textual>=1.0.0",
     "rich>=13.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
 ]
 
 [project.scripts]
 strix-pydantic = "strix_pydantic.interface.cli:scan"
+strix-service = "strix_pydantic.service.backend:app"
+strix-client = "strix_pydantic.service.cli_client:main"
 
 [project.optional-dependencies]
 dev = [
@@ -33,6 +37,10 @@ dev = [
 ui = [
     "textual>=1.0.0",
     "rich>=13.0.0",
+]
+service = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]
