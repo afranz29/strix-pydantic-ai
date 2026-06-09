@@ -1,3 +1,4 @@
+
 """Event schema for backend service event streaming."""
 
 from datetime import datetime

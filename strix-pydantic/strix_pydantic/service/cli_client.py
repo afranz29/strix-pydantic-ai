@@ -1,6 +1,7 @@
 """Async CLI client that connects to backend service."""
 
 import asyncio
+import json
 import sys
 from typing import Optional
 
@@ -85,8 +86,11 @@ class ScanClient:
                         if not line:
                             continue
 
-                        event = httpx._models.JSON.loads(line)
-                        await self._handle_event(event)
+                        try:
+                            event = json.loads(line)
+                            await self._handle_event(event)
+                        except json.JSONDecodeError:
+                            continue
 
             except Exception as e:
                 self.console.print(f"[red]❌ Connection error: {e}[/red]")
@@ -208,7 +212,7 @@ class ScanClient:
     default=True,
     help="Enable/disable UI (default: enabled)",
 )
-async def scan(
+def scan(
     target: str,
     scan_mode: str,
     model: Optional[str],
@@ -219,28 +223,35 @@ async def scan(
     ui: bool,
 ) -> None:
     """Run a security scan via the backend service."""
-    client = ScanClient(base_url=backend_url, use_ui=ui)
+    async def _run():
+        client = ScanClient(base_url=backend_url, use_ui=ui)
+
+        try:
+            await client.run_scan(
+                target=target,
+                scan_mode=scan_mode,
+                model=model,
+                mock_tools=mock_tools,
+                confirm=confirm,
+                instruction=instruction,
+            )
+        except KeyboardInterrupt:
+            print("\n⏹  Scan interrupted by user")
+            sys.exit(130)
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
+            sys.exit(1)
 
     try:
-        await client.run_scan(
-            target=target,
-            scan_mode=scan_mode,
-            model=model,
-            mock_tools=mock_tools,
-            confirm=confirm,
-            instruction=instruction,
-        )
+        asyncio.run(_run())
     except KeyboardInterrupt:
         print("\n⏹  Scan interrupted by user")
         sys.exit(130)
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        sys.exit(1)
 
 
 def main():
-    """Entry point for async CLI."""
-    asyncio.run(scan())
+    """Entry point for CLI."""
+    scan()
 
 
 if __name__ == "__main__":

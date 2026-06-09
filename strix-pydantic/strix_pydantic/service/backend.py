@@ -1,18 +1,19 @@
 """FastAPI backend service for orchestrating Strix scans."""
 
 import asyncio
+import json
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import fastapi
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph, _run_graph_async
+from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
@@ -115,41 +116,38 @@ async def get_scan_status(scan_id: str):
     return session.to_dict()
 
 
-@app.websocket("/scans/{scan_id}/events")
-async def websocket_events(websocket: WebSocket, scan_id: str):
-    """WebSocket endpoint for streaming scan events."""
+@app.get("/scans/{scan_id}/events")
+async def stream_events(scan_id: str):
+    """Stream scan events as newline-delimited JSON."""
+    logger.info(f"Event stream requested for {scan_id}, available scans: {list(scans.keys())}")
+
     session = scans.get(scan_id)
     if not session:
-        await websocket.close(code=404)
-        return
+        raise fastapi.HTTPException(status_code=404, detail="Scan not found")
 
     event_queue = scan_queues.get(scan_id)
     if not event_queue:
-        await websocket.close(code=500)
-        return
+        logger.error(f"No event queue for {scan_id}, available queues: {list(scan_queues.keys())}")
+        raise fastapi.HTTPException(status_code=500, detail="No event queue")
 
-    await websocket.accept()
-
-    try:
-        while True:
-            # Get next event from queue
-            event = await event_queue.get()
-
-            # Send to client
-            await websocket.send_json(event.model_dump(mode="json"))
-
-            # Break if scan completed
-            if event.type in ("scan_completed", "scan_failed"):
-                break
-
-    except WebSocketDisconnect:
-        logger.info(f"Client disconnected from scan {scan_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error for scan {scan_id}: {e}")
+    async def event_generator() -> AsyncGenerator[str, None]:
+        """Generate events as newline-delimited JSON."""
         try:
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+            while True:
+                # Get next event from queue
+                event = await event_queue.get()
+
+                # Send as JSON line
+                yield json.dumps(event.model_dump(mode="json")) + "\n"
+
+                # Stop if scan completed
+                if event.type in ("scan_completed", "scan_failed"):
+                    break
+
+        except Exception as e:
+            logger.error(f"Event streaming error for scan {scan_id}: {e}")
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
@@ -164,7 +162,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
         # Create event emitter
         async def emit_event(event_type: str, payload: dict[str, Any]) -> None:
             """Emit event to queue."""
-            timestamp = datetime.utcnow()
+            timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
             payload["scan_id"] = scan_id
             payload["timestamp"] = timestamp
             payload["type"] = event_type
@@ -282,10 +280,26 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             # Run orchestrator
             logger.info(f"Starting orchestrator for scan {scan_id}")
             graph = build_orchestrator_graph()
-            await _run_graph_async(graph, state, deps)
+            result = graph.run(state=state, deps=deps)
+
+            # Handle both sync and async returns
+            if hasattr(result, "__await__"):
+                await result
+            else:
+                pass  # Sync result, already done
 
             session.state = state
             session.status = "completed"
+
+            # Emit completion event
+            duration = time.time() - start_time
+            vuln_count = len(state.vulnerabilities) if state else 0
+            iterations = len([r for r in state.runs]) if state else 0
+            await emit_event("scan_completed", {
+                "duration_seconds": duration,
+                "vulnerabilities_count": vuln_count,
+                "iterations": iterations,
+            })
 
         except Exception as e:
             logger.error(f"Scan {scan_id} orchestrator error: {e}", exc_info=True)
@@ -310,19 +324,6 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
         logger.error(f"Scan {scan_id} background error: {e}", exc_info=True)
         session.status = "failed"
         session.error = str(e)
-
-        duration = time.time() - start_time
-        try:
-            await event_queue.put(
-                ScanFailedEvent(
-                    scan_id=scan_id,
-                    timestamp=datetime.utcnow(),
-                    error=str(e),
-                    duration_seconds=duration,
-                )
-            )
-        except Exception as eq_error:
-            logger.error(f"Failed to emit error event: {eq_error}")
 
 
 @app.get("/health")
