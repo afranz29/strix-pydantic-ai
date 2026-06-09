@@ -13,6 +13,7 @@ import click
 from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
+from strix_pydantic.interface.tui import StrixTUIApp, OperationStatus
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
 from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
 from strix_pydantic.tools.tool_registry import ToolRegistry
@@ -125,6 +126,11 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
     is_flag=True,
     help="Pause and ask for confirmation between agent phases",
 )
+@click.option(
+    "--ui/--no-ui",
+    default=True,
+    help="Use Textual UI for progress display (default: enabled)",
+)
 def scan(
     target: str,
     scan_mode: str,
@@ -137,6 +143,7 @@ def scan(
     mock_tools: bool,
     instruction: str,
     confirm: bool,
+    ui: bool,
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -149,6 +156,11 @@ def scan(
         log_path = setup_logging(Path(log_file), verbose=verbose)
     else:
         log_path = setup_logging(verbose=verbose)
+
+    # Initialize TUI if requested
+    tui_app = StrixTUIApp(use_ui=ui)
+    if ui:
+        tui_app.start()
 
     # Print startup lines
     click.echo(f"📋 Strix Non-Interactive Scanner")
@@ -283,8 +295,9 @@ def scan(
             except Exception as e:
                 logger.warning("Failed to destroy sandbox: %s", e, exc_info=True)
 
-    # Print final summary
-    _print_final_summary(state)
+    # Print final summary and TUI display
+    _print_final_summary(state, tui_app)
+    tui_app.stop()
     if interrupted:
         sys.exit(130)
     if exit_code:
@@ -537,12 +550,13 @@ async def _run_graph_async(
         raise
 
 
-def _print_final_summary(state: StrixRunState) -> None:
+def _print_final_summary(state: StrixRunState, tui_app: Optional[StrixTUIApp] = None) -> None:
     """
-    Print final summary in Go-style format.
+    Print final summary in Go-style format and TUI display.
 
     Args:
         state: Run state with findings
+        tui_app: Optional TUI app to display summary
     """
     click.echo("\n" + "=" * 60)
     click.echo(f"🤖 [AGENT STATUSES]")
@@ -560,7 +574,10 @@ def _print_final_summary(state: StrixRunState) -> None:
         for i, vuln in enumerate(state.vulnerabilities, 1):
             title = vuln.get("title", "Unknown")
             severity = vuln.get("severity", "unknown")
+            description = vuln.get("description", "")
             click.echo(f"   {i}. {title} ({severity})")
+            if tui_app:
+                tui_app.show_vulnerability(title, severity, description)
 
     if state.tool_observations:
         total_observations = len(state.tool_observations)
@@ -608,5 +625,9 @@ def _print_final_summary(state: StrixRunState) -> None:
         click.echo(f"✅ Scan completed successfully")
         click.echo(f"   Run ID: {state.run_id}")
         click.echo(f"   Total iterations: {state.iteration}")
+
+    if tui_app:
+        summary = f"Run: {state.run_id}\nIterations: {state.iteration}\nVulnerabilities: {len(state.vulnerabilities)}"
+        tui_app.show_summary(summary)
 if __name__ == "__main__":
     scan()
