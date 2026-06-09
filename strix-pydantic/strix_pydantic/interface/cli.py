@@ -244,6 +244,15 @@ def scan(
             run_state=state,
         )
 
+        # Wire up TUI callbacks if UI is enabled
+        ui_callbacks = None
+        if ui:
+            ui_callbacks = {
+                "update_agent_status": tui_app.update_agent_status,
+                "add_output": tui_app.add_log,
+                "show_vulnerability": tui_app.show_vulnerability,
+            }
+
         deps = StrixDeps(
             sandbox_url=sandbox_url,
             tool_registry=tool_registry,
@@ -251,6 +260,9 @@ def scan(
             agents=agents,
             sandbox_client=sandbox_client,
             confirm_proceed=_make_confirm_callback() if confirm else None,
+            ui_update_agent_status=ui_callbacks["update_agent_status"] if ui_callbacks else None,
+            ui_add_output=ui_callbacks["add_output"] if ui_callbacks else None,
+            ui_show_vulnerability=ui_callbacks["show_vulnerability"] if ui_callbacks else None,
         )
 
         click.echo(f"✅ Initialized {len(agents)} agent roles")

@@ -86,5 +86,10 @@ class StrixDeps:
     # Called between roles: (completed_role, next_role, summary_snippet, vuln_count) -> bool
     confirm_proceed: Optional[Callable[[str, str, str, int], bool]] = None
 
+    # Optional TUI callbacks for real-time dashboard updates
+    ui_update_agent_status: Optional[Callable[[str, str, int], None]] = None  # (role, status, iterations)
+    ui_add_output: Optional[Callable[[str, str], None]] = None  # (message, style)
+    ui_show_vulnerability: Optional[Callable[[str, str, str], None]] = None  # (title, severity, desc)
+
     # Optional context for tracking
     parent_context: dict[str, Any] = field(default_factory=dict)

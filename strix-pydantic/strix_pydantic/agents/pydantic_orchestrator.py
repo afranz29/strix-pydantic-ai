@@ -159,6 +159,10 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
         state.agent_statuses[role] = "running"
 
+        # Update UI if callbacks are available
+        if deps.ui_update_agent_status:
+            deps.ui_update_agent_status(role, "running", state.iteration)
+
         # Build prompt — inject prior role outputs as context
         base = f"Target: {state.target}. " + (
             state.instruction if state.instruction else f"Scan mode: {state.scan_mode}."
@@ -199,7 +203,17 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
 
         if hasattr(output, "vulnerabilities"):
             for v in output.vulnerabilities:
-                state.vulnerabilities.append(v.model_dump())
+                vuln_dict = v.model_dump()
+                state.vulnerabilities.append(vuln_dict)
+
+                # Update UI with vulnerability
+                if deps.ui_show_vulnerability:
+                    deps.ui_show_vulnerability(
+                        v.title,
+                        v.severity,
+                        v.description,
+                    )
+
             logger.info(f"   Extracted {len(output.vulnerabilities)} vulnerabilities")
 
         if hasattr(output, "notes"):
@@ -207,6 +221,10 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 state.notes.append({"content": n, "role": role})
 
         logger.info(f"✅ [AGENT] {role} completed ({len(summary)} chars)")
+
+        # Update UI with agent completion
+        if deps.ui_update_agent_status:
+            deps.ui_update_agent_status(role, "completed", state.iteration)
 
         # Between-phase confirmation gate
         next_role_index = roles.index(role) + 1
