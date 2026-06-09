@@ -5,14 +5,20 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 import fastapi
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
+from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph, _run_graph_async
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
+from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
+from strix_pydantic.runtime.bootstrap import initialize_sandbox
+from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
+from strix_pydantic.tools.tool_registry import ToolRegistry
+from strix_pydantic.runtime.sandbox_client import SandboxClient
 from strix_pydantic.service.events import (
     AgentCompletedEvent,
     AgentStartedEvent,
@@ -38,6 +44,7 @@ class ScanRequest(BaseModel):
     mock_tools: bool = False
     confirm: bool = False
     instruction: str = ""
+    sandbox_url: Optional[str] = None
 
 
 class ScanResponse(BaseModel):
@@ -58,6 +65,19 @@ class ScanSession:
         self.state: Optional[StrixRunState] = None
         self.status = "initialized"  # initialized, running, completed, failed
         self.error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        """Convert session to dict for API responses."""
+        return {
+            "scan_id": self.scan_id,
+            "status": self.status,
+            "target": self.request.target,
+            "scan_mode": self.request.scan_mode,
+            "start_time": self.start_time,
+            "duration_seconds": time.time() - self.start_time,
+            "error": self.error,
+            "vulnerabilities": len(self.state.vulnerabilities) if self.state else 0,
+        }
 
 
 app = fastapi.FastAPI(title="Strix Backend Service")
@@ -92,18 +112,7 @@ async def get_scan_status(scan_id: str):
     if not session:
         raise fastapi.HTTPException(status_code=404, detail="Scan not found")
 
-    return {
-        "scan_id": scan_id,
-        "status": session.status,
-        "target": session.request.target,
-        "scan_mode": session.request.scan_mode,
-        "start_time": session.start_time,
-        "duration_seconds": time.time() - session.start_time,
-        "error": session.error,
-        "vulnerabilities": (
-            len(session.state.vulnerabilities) if session.state else 0
-        ),
-    }
+    return session.to_dict()
 
 
 @app.websocket("/scans/{scan_id}/events")
@@ -147,75 +156,173 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
     """Run scan in background with event streaming."""
     session = scans[scan_id]
     event_queue = scan_queues[scan_id]
+    start_time = time.time()
 
     try:
         session.status = "running"
 
         # Create event emitter
-        async def emit_event(event_type: str, **kwargs):
+        async def emit_event(event_type: str, payload: dict[str, Any]) -> None:
             """Emit event to queue."""
             timestamp = datetime.utcnow()
-            kwargs["scan_id"] = scan_id
-            kwargs["timestamp"] = timestamp
-            kwargs["type"] = event_type
+            payload["scan_id"] = scan_id
+            payload["timestamp"] = timestamp
+            payload["type"] = event_type
 
             # Create appropriate event class
             if event_type == "scan_started":
-                event = ScanStartedEvent(**kwargs)
+                event = ScanStartedEvent(**payload)
             elif event_type == "agent_started":
-                event = AgentStartedEvent(**kwargs)
+                event = AgentStartedEvent(**payload)
             elif event_type == "agent_completed":
-                event = AgentCompletedEvent(**kwargs)
+                event = AgentCompletedEvent(**payload)
             elif event_type == "vulnerability_found":
-                event = VulnerabilityFoundEvent(**kwargs)
+                event = VulnerabilityFoundEvent(**payload)
             elif event_type == "scan_completed":
-                event = ScanCompletedEvent(**kwargs)
+                event = ScanCompletedEvent(**payload)
             elif event_type == "scan_failed":
-                event = ScanFailedEvent(**kwargs)
+                event = ScanFailedEvent(**payload)
             else:
                 return
 
             await event_queue.put(event)
 
-        # Emit scan started
-        await emit_event(
-            "scan_started",
-            target=request.target,
-            scan_mode=request.scan_mode,
-            model=request.model or "auto",
-        )
+        # Setup orchestrator like CLI does
+        try:
+            if request.model:
+                model_spec = normalize_model_spec(request.model)
+            else:
+                model_spec, _ = resolve_model_config()
 
-        # TODO: Integrate with actual orchestrator
-        # For now, just emit a test event
-        await emit_event("agent_started", role="reconnaissance", iteration=1)
-        await asyncio.sleep(1)
-        await emit_event("agent_completed", role="reconnaissance", iteration=1, vulnerabilities_found=0)
+        except Exception as e:
+            await emit_event("scan_failed", {
+                "error": f"Failed to resolve model: {e}",
+                "duration_seconds": time.time() - start_time,
+            })
+            session.status = "failed"
+            session.error = str(e)
+            return
 
-        # Emit scan completed
-        duration = time.time() - session.start_time
-        await emit_event(
-            "scan_completed",
-            duration_seconds=duration,
-            vulnerabilities_count=0,
-            iterations=1,
-        )
+        # Initialize sandbox
+        try:
+            if request.mock_tools:
+                from strix_pydantic.tools.mock_tools import register_mock_tools
+                sandbox_url = "http://127.0.0.1:48081"
+                sandbox_client = None
+                tool_registry = ToolRegistry()
+                register_mock_tools(tool_registry)
+                runtime = None
+                sandbox_info = None
+            else:
+                run_id = scan_id
+                sandbox_url, auth_token, runtime, sandbox_info = await initialize_sandbox(run_id, request.sandbox_url or None)
+                sandbox_client = SandboxClient(
+                    base_url=sandbox_url,
+                    auth_token=auth_token,
+                    execute_timeout=120.0,
+                )
+                tool_registry = ToolRegistry()
 
-        session.status = "completed"
+        except Exception as e:
+            await emit_event("scan_failed", {
+                "error": f"Failed to initialize sandbox: {e}",
+                "duration_seconds": time.time() - start_time,
+            })
+            session.status = "failed"
+            session.error = str(e)
+            return
+
+        try:
+            # Register strix tools
+            from strix_pydantic.interface.cli import _register_strix_tools, _build_agents
+            if not request.mock_tools:
+                _register_strix_tools(tool_registry)
+
+            # Parse skills
+            skill_list = []
+
+            # Create run state
+            state = StrixRunState(
+                run_id=scan_id,
+                target=request.target,
+                scan_mode=request.scan_mode,
+                instruction=request.instruction,
+                active_skills=skill_list,
+            )
+
+            # Create run config
+            run_config = RunConfig(
+                model_name=model_spec,
+                scan_mode=request.scan_mode,
+                non_interactive=True,
+                execute_timeout=120.0,
+            )
+
+            # Build agents
+            agents = _build_agents(
+                model_spec,
+                skill_list,
+                run_config,
+                tool_registry,
+                sandbox_client=sandbox_client,
+                run_state=state,
+            )
+
+            # Create deps with event emitter
+            deps = StrixDeps(
+                sandbox_url=sandbox_url,
+                tool_registry=tool_registry,
+                run_config=run_config,
+                agents=agents,
+                sandbox_client=sandbox_client,
+                event_emitter=emit_event,  # ← Pass event emitter
+                confirm_proceed=None,  # No interactive confirmation in service
+            )
+
+            # Run orchestrator
+            logger.info(f"Starting orchestrator for scan {scan_id}")
+            graph = build_orchestrator_graph()
+            await _run_graph_async(graph, state, deps)
+
+            session.state = state
+            session.status = "completed"
+
+        except Exception as e:
+            logger.error(f"Scan {scan_id} orchestrator error: {e}", exc_info=True)
+            session.status = "failed"
+            session.error = str(e)
+
+            duration = time.time() - start_time
+            await emit_event("scan_failed", {
+                "error": str(e),
+                "duration_seconds": duration,
+            })
+
+        finally:
+            # Cleanup
+            if not request.mock_tools and runtime and sandbox_info:
+                try:
+                    await runtime.destroy_sandbox(sandbox_info["workspace_id"])
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup sandbox: {e}")
 
     except Exception as e:
-        logger.error(f"Scan {scan_id} failed: {e}", exc_info=True)
+        logger.error(f"Scan {scan_id} background error: {e}", exc_info=True)
         session.status = "failed"
         session.error = str(e)
 
-        duration = time.time() - session.start_time
-        await event_queue.put(
-            ScanFailedEvent(
-                scan_id=scan_id,
-                timestamp=datetime.utcnow(),
-                error=str(e),
-                duration_seconds=duration,
+        duration = time.time() - start_time
+        try:
+            await event_queue.put(
+                ScanFailedEvent(
+                    scan_id=scan_id,
+                    timestamp=datetime.utcnow(),
+                    error=str(e),
+                    duration_seconds=duration,
+                )
             )
-        )
+        except Exception as eq_error:
+            logger.error(f"Failed to emit error event: {eq_error}")
 
 
 @app.get("/health")

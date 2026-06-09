@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from typing import Any
 
 from pydantic_graph import End, GraphBuilder
@@ -124,16 +125,31 @@ def build_orchestrator_graph() -> Any:
 
 async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     """Run the main orchestration workflow with proper error handling."""
+    start_time = time.time()
+
     # ========== BOOTSTRAP ==========
     logger.info(f"🚀 [BOOTSTRAP] Run {state.run_id} starting")
     logger.info(f"   Target: {state.target}")
     logger.info(f"   Scan Mode: {state.scan_mode}")
     logger.info(f"   Model: {deps.run_config.model_name}")
 
+    # Emit scan started event
+    if deps.event_emitter:
+        await deps.event_emitter("scan_started", {
+            "target": state.target,
+            "scan_mode": state.scan_mode,
+            "model": deps.run_config.model_name,
+        })
+
     # Validate target
     if not state.target:
         state.error = "Target URL is required"
         logger.error(f"❌ [ABORT] Target is empty")
+        if deps.event_emitter:
+            await deps.event_emitter("scan_failed", {
+                "error": "Target URL is required",
+                "duration_seconds": time.time() - start_time,
+            })
         return End(f"Aborted: Target URL is required")
 
     # Initialize message history for all agent roles
@@ -158,6 +174,13 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         agent = deps.agents[role]
         logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
         state.agent_statuses[role] = "running"
+
+        # Emit agent started event
+        if deps.event_emitter:
+            await deps.event_emitter("agent_started", {
+                "role": role,
+                "iteration": state.iteration,
+            })
 
         # Update UI if callbacks are available
         if deps.ui_update_agent_status:
@@ -206,6 +229,18 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 vuln_dict = v.model_dump()
                 state.vulnerabilities.append(vuln_dict)
 
+                # Emit vulnerability found event
+                if deps.event_emitter:
+                    await deps.event_emitter("vulnerability_found", {
+                        "role": role,
+                        "title": v.title,
+                        "severity": v.severity,
+                        "description": v.description,
+                        "cve_id": v.cve_id,
+                        "parameter": v.parameter,
+                        "poc": v.poc,
+                    })
+
                 # Update UI with vulnerability
                 if deps.ui_show_vulnerability:
                     deps.ui_show_vulnerability(
@@ -221,6 +256,15 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 state.notes.append({"content": n, "role": role})
 
         logger.info(f"✅ [AGENT] {role} completed ({len(summary)} chars)")
+
+        # Emit agent completed event
+        role_vulns = [v for v in state.vulnerabilities if v.get("role") == role]
+        if deps.event_emitter:
+            await deps.event_emitter("agent_completed", {
+                "role": role,
+                "iteration": state.iteration,
+                "vulnerabilities_found": len(role_vulns),
+            })
 
         # Update UI with agent completion
         if deps.ui_update_agent_status:
@@ -256,5 +300,14 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     state.final_summary = "\n".join(summary_lines)
 
     logger.info(f"✅ [FINALIZE] Run complete")
+
+    # Emit scan completed event
+    duration = time.time() - start_time
+    if deps.event_emitter:
+        await deps.event_emitter("scan_completed", {
+            "duration_seconds": duration,
+            "vulnerabilities_count": len(state.vulnerabilities),
+            "iterations": state.iteration,
+        })
 
     return End("\n".join(summary_lines))

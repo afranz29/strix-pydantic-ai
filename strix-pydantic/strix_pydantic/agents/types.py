@@ -1,7 +1,7 @@
 """Shared types for graph orchestration and agent execution."""
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, ModelMessage
@@ -90,6 +90,9 @@ class StrixDeps:
     ui_update_agent_status: Optional[Callable[[str, str, int], None]] = None  # (role, status, iterations)
     ui_add_output: Optional[Callable[[str, str], None]] = None  # (message, style)
     ui_show_vulnerability: Optional[Callable[[str, str, str], None]] = None  # (title, severity, desc)
+
+    # Optional event emitter for backend service integration
+    event_emitter: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None  # (event_type, payload)
 
     # Optional context for tracking
     parent_context: dict[str, Any] = field(default_factory=dict)
