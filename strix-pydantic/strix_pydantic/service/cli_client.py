@@ -76,12 +76,19 @@ class ScanClient:
 
             self.console.print(f"[green]✓[/green] Scan started: {scan_id}\n")
 
-            # 2. Connect to WebSocket and stream events
+            # 2. Connect to stream events
             try:
                 async with client.stream(
                     "GET",
                     f"{self.base_url}/scans/{scan_id}/events",
+                    timeout=None,  # No timeout for long-running streams
                 ) as response:
+                    if response.status_code != 200:
+                        self.console.print(
+                            f"[red]❌ Stream error: HTTP {response.status_code}[/red]"
+                        )
+                        sys.exit(1)
+
                     async for line in response.aiter_lines():
                         if not line:
                             continue
@@ -89,11 +96,14 @@ class ScanClient:
                         try:
                             event = json.loads(line)
                             await self._handle_event(event)
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            self.console.print(f"[dim]Invalid JSON: {line[:50]}[/dim]")
                             continue
 
             except Exception as e:
+                import traceback
                 self.console.print(f"[red]❌ Connection error: {e}[/red]")
+                traceback.print_exc()
                 sys.exit(1)
 
     async def _handle_event(self, event: dict) -> None:
