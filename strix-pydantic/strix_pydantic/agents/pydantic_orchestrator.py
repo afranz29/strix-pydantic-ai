@@ -175,6 +175,9 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
         state.agent_statuses[role] = "running"
 
+        # Track vulnerabilities count before this agent runs
+        vuln_count_before = len(state.vulnerabilities)
+
         # Emit agent started event
         if deps.event_emitter:
             await deps.event_emitter("agent_started", {
@@ -257,13 +260,16 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
 
         logger.info(f"✅ [AGENT] {role} completed ({len(summary)} chars)")
 
+        # Calculate vulnerabilities found in this phase only
+        vuln_count_after = len(state.vulnerabilities)
+        vuln_found_this_phase = vuln_count_after - vuln_count_before
+
         # Emit agent completed event
-        role_vulns = [v for v in state.vulnerabilities if v.get("role") == role]
         if deps.event_emitter:
             await deps.event_emitter("agent_completed", {
                 "role": role,
                 "iteration": state.iteration,
-                "vulnerabilities_found": len(role_vulns),
+                "vulnerabilities_found": vuln_found_this_phase,
             })
 
         # Update UI with agent completion

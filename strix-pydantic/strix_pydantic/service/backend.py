@@ -294,7 +294,8 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             # Emit completion event
             duration = time.time() - start_time
             vuln_count = len(state.vulnerabilities) if state else 0
-            iterations = len([r for r in state.runs]) if state else 0
+            # Count agent phases completed (typically 3: reconnaissance, exploitation, post_exploitation)
+            iterations = len(state.agent_statuses) if state else 0
             await emit_event("scan_completed", {
                 "duration_seconds": duration,
                 "vulnerabilities_count": vuln_count,
