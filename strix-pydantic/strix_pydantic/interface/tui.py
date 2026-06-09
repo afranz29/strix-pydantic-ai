@@ -6,10 +6,8 @@ from enum import Enum
 from typing import Optional
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 
 class OperationStatus(str, Enum):
@@ -25,16 +23,18 @@ class OperationStatus(str, Enum):
 
 
 class StrixProgressApp:
-    """Simple progress display using Rich Live."""
+    """Split-panel display using Rich - phases on left, results on right."""
 
     def __init__(self):
         """Initialize progress app."""
         self.console = Console()
-        self._live: Optional[Live] = None
         self._current_status = "Initializing..."
         self._elapsed = 0
         self._timer_thread: Optional[threading.Thread] = None
         self._running = False
+        self._phases: list[str] = []
+        self._results: list[str] = []
+        self._max_results = 50  # Keep last N results
 
     def start(self) -> None:
         """Start the progress display."""
@@ -56,9 +56,12 @@ class StrixProgressApp:
     def update_status(self, status: OperationStatus) -> None:
         """Update the current operation status."""
         self._current_status = status.value
+        # Add to phases list if not already there
+        if status.value not in self._phases:
+            self._phases.append(status.value)
 
     def add_log(self, message: str, level: str = "info") -> None:
-        """Add a log message."""
+        """Add a log message to results panel."""
         icon_map = {
             "info": "ℹ",
             "success": "✅",
@@ -77,10 +80,10 @@ class StrixProgressApp:
         self.console.print(f"{icon} {message}", style=style)
 
     def show_vulnerability(self, title: str, severity: str, description: str) -> None:
-        """Display a vulnerability."""
+        """Display a vulnerability in results panel."""
         severity_colors = {
             "critical": "red",
-            "high": "light_red",
+            "high": "bright_red",
             "medium": "yellow",
             "low": "blue",
             "info": "cyan",
@@ -115,6 +118,31 @@ class StrixProgressApp:
     def is_running(self) -> bool:
         """Check if TUI is running."""
         return self._running
+
+    def get_phases_panel(self) -> Panel:
+        """Get formatted phases panel."""
+        phases_text = Text()
+        for phase in self._phases:
+            phases_text.append(f"✓ {phase}\n", style="green")
+
+        if self._current_status and self._current_status not in [p for p in self._phases]:
+            phases_text.append(f"→ {self._current_status}\n", style="cyan bold")
+
+        elapsed_str = f"{self._elapsed // 60:02d}:{self._elapsed % 60:02d}"
+        phases_text.append(f"\nElapsed: {elapsed_str}", style="dim")
+
+        return Panel(phases_text, title="[bold blue]Phases[/bold blue]", expand=False)
+
+    def get_results_panel(self) -> Panel:
+        """Get formatted results panel."""
+        results_text = Text()
+        for result in self._results[-self._max_results :]:
+            results_text.append(result + "\n")
+
+        if not self._results:
+            results_text.append("Waiting for results...", style="dim")
+
+        return Panel(results_text, title="[bold cyan]Results[/bold cyan]", overflow="fold")
 
 
 class StrixTUIApp:
