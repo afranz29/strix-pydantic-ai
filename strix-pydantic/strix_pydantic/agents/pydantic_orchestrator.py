@@ -77,6 +77,22 @@ def _log_agent_result(role: str, result: Any) -> None:
     _log_message_sequence(role, result.all_messages(), label="all_messages")
 
 
+def _extract_tool_calls(result: Any) -> list[dict[str, Any]]:
+    """Extract tool calls from agent result messages."""
+    tools_called = []
+    messages = result.all_messages()
+
+    for msg in messages:
+        parts = getattr(msg, "parts", []) or []
+        for part in parts:
+            part_kind = getattr(part, "part_kind", None)
+            if part_kind == "tool-call":
+                tool_name = getattr(part, "tool_name", "unknown")
+                tools_called.append({"name": tool_name})
+
+    return tools_called
+
+
 def build_orchestrator_graph() -> Any:
     """
     Build the orchestration graph using GraphBuilder.
@@ -226,6 +242,24 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         state.agent_responses[role] = summary
         state.agent_statuses[role] = "completed"
         prior_outputs[role] = summary
+
+        # Emit agent message with reasoning
+        if deps.event_emitter:
+            await deps.event_emitter("agent_message", {
+                "role": role,
+                "iteration": state.iteration,
+                "message": summary,
+            })
+
+        # Emit tool execution events
+        if deps.event_emitter:
+            tools_called = _extract_tool_calls(result)
+            for tool_info in tools_called:
+                await deps.event_emitter("tool_executed", {
+                    "role": role,
+                    "tool_name": tool_info["name"],
+                    "status": "completed",
+                })
 
         if hasattr(output, "vulnerabilities"):
             for v in output.vulnerabilities:

@@ -1,0 +1,128 @@
+/* Textual TUI Styles for Strix Scan Dashboard */
+
+Screen {
+    layout: horizontal;
+    background: $surface;
+    color: $text;
+}
+
+#agents-panel {
+    width: 50%;
+    height: 1fr;
+    border: solid $primary;
+    padding: 1;
+    background: transparent;
+    color: $text;
+}
+
+#activity-panel {
+    width: 50%;
+    height: 1fr;
+    border: solid $warning;
+    padding: 1;
+    background: transparent;
+    color: $text;
+}
+
+#agent-activity-panel {
+    width: 1fr;
+    height: 1fr;
+    border: solid $accent;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    overflow-y: auto;
+}
+
+#vulnerabilities-panel {
+    width: 1fr;
+    height: 1fr;
+    border: solid $success;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    overflow-y: auto;
+}
+
+/* Vulnerability cards */
+.vulnerability-card {
+    margin: 0 0 1 0;
+    height: auto;
+}
+
+.severity-critical {
+    border: solid $error;
+    color: $error;
+}
+
+.severity-high {
+    border: solid $warning;
+    color: $warning;
+}
+
+.severity-medium {
+    border: solid $accent;
+    color: $accent;
+}
+
+.severity-low {
+    border: solid $primary;
+    color: $primary;
+}
+
+.severity-info {
+    border: solid $secondary;
+    color: $secondary;
+}
+
+/* Status indicators */
+.status-running {
+    color: $accent;
+}
+
+.status-completed {
+    color: $success;
+}
+
+.status-failed {
+    color: $error;
+}
+
+.status-initialized {
+    color: $text-disabled;
+}
+
+/* Modal styles */
+Modal {
+    background: $boost;
+    color: $text;
+}
+
+Button {
+    margin: 0 1;
+    color: $text;
+}
+
+Button:focus {
+    border: solid $accent;
+    color: $text;
+}
+
+/* Text styling */
+.title {
+    text-style: bold;
+    color: $text;
+}
+
+.dimmed {
+    color: $text-disabled;
+}
+
+/* Ensure panel text is readable */
+Panel {
+    color: $text;
+}
+
+Static {
+    color: $text;
+}

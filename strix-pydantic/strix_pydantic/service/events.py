@@ -16,6 +16,7 @@ class ScanEvent(BaseModel):
         "scan_failed",
         "agent_started",
         "agent_completed",
+        "agent_message",
         "vulnerability_found",
         "tool_executed",
         "log_message",
@@ -39,6 +40,15 @@ class AgentStartedEvent(ScanEvent):
     type: Literal["agent_started"]
     role: str
     iteration: int
+
+
+class AgentMessageEvent(ScanEvent):
+    """Emitted with agent reasoning/output during execution."""
+
+    type: Literal["agent_message"]
+    role: str
+    iteration: int
+    message: str
 
 
 class AgentCompletedEvent(ScanEvent):
@@ -103,6 +113,7 @@ class ScanFailedEvent(ScanEvent):
 AnyEvent = (
     ScanStartedEvent
     | AgentStartedEvent
+    | AgentMessageEvent
     | AgentCompletedEvent
     | VulnerabilityFoundEvent
     | ToolExecutedEvent

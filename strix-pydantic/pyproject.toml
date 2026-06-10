@@ -26,6 +26,8 @@ dependencies = [
 strix-pydantic = "strix_pydantic.interface.cli:scan"
 strix-service = "strix_pydantic.service.backend:app"
 strix-client = "strix_pydantic.service.cli_client:main"
+strix-tui = "strix_pydantic.service.tui_client:main"
+strix-tui-standalone = "strix_pydantic.service.runner:main"
 
 [project.optional-dependencies]
 dev = [

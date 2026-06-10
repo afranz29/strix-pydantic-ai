@@ -22,14 +22,49 @@ from strix_pydantic.tools.tool_registry import ToolRegistry
 from strix_pydantic.runtime.sandbox_client import SandboxClient
 from strix_pydantic.service.events import (
     AgentCompletedEvent,
+    AgentMessageEvent,
     AgentStartedEvent,
     ScanCompletedEvent,
     ScanFailedEvent,
     ScanStartedEvent,
+    ToolExecutedEvent,
     VulnerabilityFoundEvent,
+    LogMessageEvent,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class QueueHandler(logging.Handler):
+    """Logging handler that emits messages to an async queue."""
+
+    def __init__(self, queue: asyncio.Queue, min_level: int = logging.INFO):
+        """Initialize handler with target queue."""
+        super().__init__(min_level)
+        self.queue = queue
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit log record to queue."""
+        try:
+            # Convert log level to our event levels
+            level_map = {
+                logging.DEBUG: "info",
+                logging.INFO: "info",
+                logging.WARNING: "warning",
+                logging.ERROR: "error",
+                logging.CRITICAL: "error",
+            }
+            level = level_map.get(record.levelno, "info")
+            message = self.format(record)
+
+            # Put event on queue (non-blocking)
+            self.queue.put_nowait({
+                "type": "log_message",
+                "level": level,
+                "message": message,
+            })
+        except Exception:
+            pass
 
 # In-memory scan storage
 scans: dict[str, "ScanSession"] = {}
@@ -159,6 +194,15 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
     try:
         session.status = "running"
 
+        # Setup logging handler to emit log messages to the event queue
+        handler = QueueHandler(event_queue, min_level=logging.INFO)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        # Add handler to relevant loggers
+        for logger_name in ["strix_pydantic.agents.pydantic_orchestrator", "strix_pydantic"]:
+            module_logger = logging.getLogger(logger_name)
+            module_logger.addHandler(handler)
+
         # Create event emitter
         async def emit_event(event_type: str, payload: dict[str, Any]) -> None:
             """Emit event to queue."""
@@ -172,10 +216,16 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                 event = ScanStartedEvent(**payload)
             elif event_type == "agent_started":
                 event = AgentStartedEvent(**payload)
+            elif event_type == "agent_message":
+                event = AgentMessageEvent(**payload)
             elif event_type == "agent_completed":
                 event = AgentCompletedEvent(**payload)
+            elif event_type == "tool_executed":
+                event = ToolExecutedEvent(**payload)
             elif event_type == "vulnerability_found":
                 event = VulnerabilityFoundEvent(**payload)
+            elif event_type == "log_message":
+                event = LogMessageEvent(**payload)
             elif event_type == "scan_completed":
                 event = ScanCompletedEvent(**payload)
             elif event_type == "scan_failed":
@@ -314,6 +364,14 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             })
 
         finally:
+            # Remove logging handler
+            try:
+                for logger_name in ["strix_pydantic.agents.pydantic_orchestrator", "strix_pydantic"]:
+                    module_logger = logging.getLogger(logger_name)
+                    module_logger.removeHandler(handler)
+            except Exception:
+                pass
+
             # Cleanup
             if not request.mock_tools and runtime and sandbox_info:
                 try:
