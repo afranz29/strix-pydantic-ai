@@ -2,18 +2,50 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import click
 import httpx
-from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
 from textual.reactive import reactive
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(log_file: Optional[Path] = None) -> Path:
+    """Configure logging to file and console."""
+    if log_file is None:
+        log_file = Path.cwd() / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    # Create logs directory if needed
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Setup file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+
+    # Get root logger and add handler
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+
+    # Set TUI logger to DEBUG
+    logging.getLogger("strix_pydantic.service.tui_client").setLevel(logging.DEBUG)
+
+    logger.info(f"TUI logging to {log_file}")
+    return log_file
 
 
 class AgentsPanel(Static):
@@ -22,7 +54,7 @@ class AgentsPanel(Static):
     agents = reactive({})
     current_agent = reactive("")
 
-    def render(self) -> Panel:
+    def render(self) -> Text:
         """Render agent status panel (matches original Strix styling)."""
         content = Text()
 
@@ -51,7 +83,7 @@ class AgentsPanel(Static):
             else:
                 content.append(text_line, style=style)
 
-        return Panel(content, title="Agents", border_style="blue", title_align="left")
+        return content
 
 
 class ActivityPanel(Static):
@@ -62,7 +94,7 @@ class ActivityPanel(Static):
     current_status = reactive("initializing")
     elapsed_seconds = reactive(0)
 
-    def render(self) -> Panel:
+    def render(self) -> Text:
         """Render activity status panel."""
         content = Text()
         content.append(f"Target: {self.target}\n")
@@ -70,7 +102,7 @@ class ActivityPanel(Static):
         content.append(f"Status: {self.current_status}\n")
         content.append(f"Elapsed: {self.elapsed_seconds}s\n")
 
-        return Panel(content, title="Activity", border_style="yellow", title_align="left")
+        return content
 
 
 class AgentActivityPanel(VerticalScroll):
@@ -301,13 +333,27 @@ class ScanTUIApp(App):
 
     def compose(self) -> ComposeResult:
         """Compose the layout with four panels."""
-        with Horizontal():
-            with Vertical():
-                with Horizontal():
+        with Vertical():
+            with Horizontal():
+                # Agents panel
+                with Vertical(id="agents-container"):
+                    yield Label("[bold]Agents[/bold]", id="agents-title")
                     yield AgentsPanel(id="agents-panel")
+
+                # Activity panel
+                with Vertical(id="activity-container"):
+                    yield Label("[bold]Activity[/bold]", id="activity-title")
                     yield ActivityPanel(id="activity-panel")
+
+                # Vulnerabilities panel
+                with Vertical(id="vulnerabilities-container"):
+                    yield Label("[bold]Vulnerabilities[/bold]", id="vulnerabilities-title")
+                    yield VulnerabilitiesPanel(id="vulnerabilities-panel")
+
+            # Events panel spans full width
+            with Vertical(id="events-container"):
+                yield Label("[bold]Events[/bold]", id="events-title")
                 yield AgentActivityPanel(id="agent-activity-panel")
-            yield VulnerabilitiesPanel(id="vulnerabilities-panel")
 
     def on_mount(self) -> None:
         """Initialize the app and start background scan."""
@@ -442,8 +488,10 @@ class ScanTUIApp(App):
     def handle_event(self, event: dict) -> None:
         """Handle incoming event from backend stream."""
         event_type = event.get("type")
+        logger.debug(f"📨 Received event: {event_type}")
 
         if event_type == "scan_started":
+            logger.info("✅ Scan started")
             self.scan_status = "running"
             self.elapsed = 0
 
@@ -452,6 +500,7 @@ class ScanTUIApp(App):
             tools_count = event.get("tools_count", 0)
             skills = event.get("skills", [])
             mock_tools = event.get("mock_tools", False)
+            logger.info(f"⚙️  Scan configured: {tools_count} tools, skills={skills}, mock={mock_tools}")
 
             log = list(self.activity_log)
             config_msg = f"⚙️  Configuration: {tools_count} tools"
@@ -468,6 +517,7 @@ class ScanTUIApp(App):
         elif event_type == "agent_started":
             role = event.get("role", "")
             iteration = event.get("iteration", 0)
+            logger.info(f"🤖 Agent started: {role} (iteration {iteration})")
             self.current_agent = role
 
             # Update agent status
@@ -552,6 +602,8 @@ class ScanTUIApp(App):
         elif event_type == "agent_completed":
             role = event.get("role", "")
             iteration = event.get("iteration", 0)
+            vuln_found = event.get("vulnerabilities_found", 0)
+            logger.info(f"✅ Agent completed: {role} ({vuln_found} vulnerabilities)")
 
             # Update agent status
             agents = dict(self.agents)
@@ -585,10 +637,12 @@ class ScanTUIApp(App):
         elif event_type == "scan_completed":
             duration = event.get("duration_seconds", 0)
             vuln_count = event.get("vulnerabilities_count", 0)
+            logger.info(f"🏁 Scan completed: {vuln_count} vulnerabilities in {duration:.1f}s")
             self.scan_status = f"completed ({vuln_count} vulnerabilities in {duration:.1f}s)"
 
         elif event_type == "scan_failed":
             error = event.get("error", "Unknown error")
+            logger.error(f"❌ Scan failed: {error}")
             self.scan_status = f"failed: {error}"
 
     def action_quit(self) -> None:
@@ -656,6 +710,22 @@ def main(
     verbose: bool,
 ) -> None:
     """Launch Textual TUI client connected to backend service."""
+    # Setup logging
+    log_file = setup_logging()
+
+    logger.info("=" * 80)
+    logger.info("🎨 Starting Strix TUI Client")
+    logger.info(f"   Backend URL: {backend_url}")
+    logger.info(f"   Target: {target}")
+    logger.info(f"   Scan Mode: {scan_mode}")
+    logger.info(f"   Model: {model or 'default'}")
+    logger.info(f"   Mock Tools: {mock_tools}")
+    if instruction:
+        logger.info(f"   Instruction: {instruction[:60]}...")
+    if skills:
+        logger.info(f"   Skills: {skills}")
+    logger.info("=" * 80)
+
     app = ScanTUIApp(
         target=target,
         scan_mode=scan_mode,
@@ -667,7 +737,10 @@ def main(
         timeout=timeout,
         verbose=verbose,
     )
+
+    logger.info("🚀 Launching TUI app")
     app.run()
+    logger.info("✅ TUI closed")
 
 
 if __name__ == "__main__":

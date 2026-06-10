@@ -1,47 +1,110 @@
 /* Textual TUI Styles for Strix Scan Dashboard */
 
 Screen {
-    layout: horizontal;
+    layout: vertical;
     background: $surface;
     color: $text;
 }
 
-#agents-panel {
-    width: 50%;
+/* Top row - Horizontal container with 3 panels (50% height) */
+Horizontal {
+    height: 1fr;
+    width: 1fr;
+}
+
+/* Top panel containers (equal width, fill height) */
+#agents-container {
+    width: 1fr;
     height: 1fr;
     border: solid $primary;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+#activity-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $warning;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+#vulnerabilities-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $success;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+/* Titles for all panels */
+#agents-title,
+#activity-title,
+#vulnerabilities-title,
+#events-title {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Panel widgets - no borders since container handles it */
+#agents-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
     padding: 1;
     background: transparent;
     color: $text;
+    margin: 0;
 }
 
 #activity-panel {
-    width: 50%;
-    height: 1fr;
-    border: solid $warning;
-    padding: 1;
-    background: transparent;
-    color: $text;
-}
-
-#agent-activity-panel {
     width: 1fr;
     height: 1fr;
-    border: solid $accent;
+    border: none;
     padding: 1;
     background: transparent;
     color: $text;
-    overflow-y: auto;
+    margin: 0;
 }
 
 #vulnerabilities-panel {
     width: 1fr;
     height: 1fr;
-    border: solid $success;
+    border: none;
     padding: 1;
     background: transparent;
     color: $text;
     overflow-y: auto;
+    margin: 0;
+}
+
+/* Bottom panel (Events) - full width, 50% height */
+#events-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $accent;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+    margin: 0;
+}
+
+#agent-activity-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    overflow-y: auto;
+    margin: 0;
 }
 
 /* Vulnerability cards */
