@@ -281,6 +281,10 @@ class ScanTUIApp(App):
         backend_url: str,
         model: Optional[str] = None,
         mock_tools: bool = False,
+        instruction: str = "",
+        skills: str = "",
+        timeout: float = 120.0,
+        verbose: bool = False,
     ):
         """Initialize the TUI app."""
         super().__init__()
@@ -289,6 +293,10 @@ class ScanTUIApp(App):
         self.backend_url = backend_url
         self.model = model
         self.mock_tools = mock_tools
+        self.instruction = instruction
+        self.skills = skills
+        self.timeout = timeout
+        self.verbose = verbose
         self.current_vuln_idx = 0
 
     def compose(self) -> ComposeResult:
@@ -394,6 +402,10 @@ class ScanTUIApp(App):
                         "scan_mode": self.scan_mode,
                         "model": self.model,
                         "mock_tools": self.mock_tools,
+                        "instruction": self.instruction,
+                        "skills": self.skills,
+                        "timeout": self.timeout,
+                        "verbose": self.verbose,
                     },
                     timeout=10.0,
                 )
@@ -435,6 +447,24 @@ class ScanTUIApp(App):
             self.scan_status = "running"
             self.elapsed = 0
 
+        elif event_type == "scan_configured":
+            # Log scan configuration
+            tools_count = event.get("tools_count", 0)
+            skills = event.get("skills", [])
+            mock_tools = event.get("mock_tools", False)
+
+            log = list(self.activity_log)
+            config_msg = f"⚙️  Configuration: {tools_count} tools"
+            if skills:
+                config_msg += f", skills: {', '.join(skills)}"
+            if mock_tools:
+                config_msg += " (mock mode)"
+            log.append({
+                "level": "info",
+                "message": config_msg,
+            })
+            self.activity_log = log
+
         elif event_type == "agent_started":
             role = event.get("role", "")
             iteration = event.get("iteration", 0)
@@ -453,13 +483,58 @@ class ScanTUIApp(App):
             })
             self.activity_log = log
 
+        elif event_type == "agent_token_usage":
+            # Add token usage to activity log
+            input_tokens = event.get("input_tokens", 0)
+            output_tokens = event.get("output_tokens", 0)
+            cache_read = event.get("cache_read_tokens", 0)
+            cache_write = event.get("cache_write_tokens", 0)
+            log = list(self.activity_log)
+            tokens_summary = f"Tokens → in: {input_tokens}, out: {output_tokens}"
+            if cache_read or cache_write:
+                tokens_summary += f", cache_read: {cache_read}, cache_write: {cache_write}"
+            log.append({
+                "level": "info",
+                "message": tokens_summary,
+            })
+            self.activity_log = log
+
+        elif event_type == "agent_thinking":
+            # Add agent thinking to activity log
+            thinking = event.get("thinking", "")
+            if thinking:
+                log = list(self.activity_log)
+                log.append({
+                    "level": "info",
+                    "message": f"💭 Thinking: {thinking[:200]}...",
+                })
+                self.activity_log = log
+
         elif event_type == "tool_executed":
             # Add tool execution to activity log
             tool_name = event.get("tool_name", "unknown")
             log = list(self.activity_log)
+
+            message = f"  → Tool: {tool_name}"
+
+            # Add command if available
+            if event.get("command"):
+                command = event["command"]
+                # Truncate long commands
+                if len(command) > 100:
+                    command = command[:97] + "..."
+                message += f"\n     Command: {command}"
+
+            # Add output if available
+            if event.get("output"):
+                output = event["output"]
+                if len(output) > 100:
+                    output = output[:97] + "..."
+                message += f"\n     Result: {output}"
+
             log.append({
                 "level": "info",
-                "message": f"  → Executed: {tool_name}",
+                "message": message,
             })
             self.activity_log = log
 
@@ -546,12 +621,39 @@ class ScanTUIApp(App):
     is_flag=True,
     help="Use mock tools for testing (no Docker required)",
 )
+@click.option(
+    "--instruction",
+    type=str,
+    default="",
+    help="Custom instruction for the agent",
+)
+@click.option(
+    "--skills",
+    type=str,
+    default="",
+    help="Comma-separated list of skills to use",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=120.0,
+    help="Tool execution timeout in seconds",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable verbose output",
+)
 def main(
     target: str,
     scan_mode: str,
     model: Optional[str],
     backend_url: str,
     mock_tools: bool,
+    instruction: str,
+    skills: str,
+    timeout: float,
+    verbose: bool,
 ) -> None:
     """Launch Textual TUI client connected to backend service."""
     app = ScanTUIApp(
@@ -560,6 +662,10 @@ def main(
         backend_url=backend_url,
         model=model,
         mock_tools=mock_tools,
+        instruction=instruction,
+        skills=skills,
+        timeout=timeout,
+        verbose=verbose,
     )
     app.run()
 

@@ -23,8 +23,11 @@ from strix_pydantic.runtime.sandbox_client import SandboxClient
 from strix_pydantic.service.events import (
     AgentCompletedEvent,
     AgentMessageEvent,
+    AgentThinkingEvent,
+    AgentTokenUsageEvent,
     AgentStartedEvent,
     ScanCompletedEvent,
+    ScanConfiguredEvent,
     ScanFailedEvent,
     ScanStartedEvent,
     ToolExecutedEvent,
@@ -33,6 +36,39 @@ from strix_pydantic.service.events import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def setup_logging() -> None:
+    """Configure logging to show all messages in stdout."""
+    # Set root logger to DEBUG
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # Remove any existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Create console handler with DEBUG level
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(formatter)
+
+    # Add handler to root logger
+    root_logger.addHandler(console_handler)
+
+    # Set specific loggers to DEBUG
+    for logger_name in [
+        "strix_pydantic",
+        "strix_pydantic.service.backend",
+        "strix_pydantic.agents.pydantic_orchestrator",
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
 
 
 class QueueHandler(logging.Handler):
@@ -81,6 +117,9 @@ class ScanRequest(BaseModel):
     confirm: bool = False
     instruction: str = ""
     sandbox_url: Optional[str] = None
+    skills: str = ""
+    timeout: float = 120.0
+    verbose: bool = False
 
 
 class ScanResponse(BaseModel):
@@ -116,13 +155,26 @@ class ScanSession:
         }
 
 
+# Configure logging on startup
+setup_logging()
+
 app = fastapi.FastAPI(title="Strix Backend Service")
+
+logger.debug("Backend initialized")
 
 
 @app.post("/scans", response_model=ScanResponse)
 async def start_scan(request: ScanRequest) -> ScanResponse:
     """Start a new security scan."""
     scan_id = f"run_{uuid.uuid4().hex[:12]}"
+
+    logger.info(f"🚀 [API] Starting scan {scan_id}")
+    logger.info(f"   Target: {request.target}")
+    logger.info(f"   Scan mode: {request.scan_mode}")
+    logger.info(f"   Model: {request.model or 'default'}")
+    logger.info(f"   Mock tools: {request.mock_tools}")
+    if request.instruction:
+        logger.info(f"   Instruction: {request.instruction[:50]}...")
 
     # Create session
     session = ScanSession(scan_id, request)
@@ -133,6 +185,8 @@ async def start_scan(request: ScanRequest) -> ScanResponse:
 
     # Start scan in background
     asyncio.create_task(_run_scan_background(scan_id, request))
+
+    logger.info(f"✅ [API] Scan {scan_id} queued for background execution")
 
     return ScanResponse(
         scan_id=scan_id,
@@ -154,33 +208,58 @@ async def get_scan_status(scan_id: str):
 @app.get("/scans/{scan_id}/events")
 async def stream_events(scan_id: str):
     """Stream scan events as newline-delimited JSON."""
-    logger.info(f"Event stream requested for {scan_id}, available scans: {list(scans.keys())}")
+    logger.info(f"📡 [API] Event stream requested for {scan_id}")
 
     session = scans.get(scan_id)
     if not session:
+        logger.warning(f"⚠️  [API] Scan {scan_id} not found. Available: {list(scans.keys())}")
         raise fastapi.HTTPException(status_code=404, detail="Scan not found")
 
     event_queue = scan_queues.get(scan_id)
     if not event_queue:
-        logger.error(f"No event queue for {scan_id}, available queues: {list(scan_queues.keys())}")
+        logger.error(f"❌ [API] No event queue for {scan_id}. Available: {list(scan_queues.keys())}")
         raise fastapi.HTTPException(status_code=500, detail="No event queue")
+
+    logger.info(f"✅ [API] Streaming events for {scan_id}")
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """Generate events as newline-delimited JSON."""
+        event_count = 0
         try:
             while True:
                 # Get next event from queue
                 event = await event_queue.get()
+                event_count += 1
+
+                # Handle both dict (from QueueHandler) and event objects (from emit_event)
+                if isinstance(event, dict):
+                    event_dict = event
+                else:
+                    event_dict = event.model_dump(mode="json")
 
                 # Send as JSON line
-                yield json.dumps(event.model_dump(mode="json")) + "\n"
+                yield json.dumps(event_dict) + "\n"
+
+                # Log major events
+                event_type = event_dict.get("type", "unknown")
+                if event_type == "scan_started":
+                    logger.info(f"📊 [STREAM] Event {event_count}: scan_started")
+                elif event_type == "agent_started":
+                    logger.info(f"📊 [STREAM] Event {event_count}: agent_started role={event_dict.get('role')}")
+                elif event_type == "agent_completed":
+                    logger.info(f"📊 [STREAM] Event {event_count}: agent_completed role={event_dict.get('role')} vulns={event_dict.get('vulnerabilities_found')}")
+                elif event_type == "scan_completed":
+                    logger.info(f"📊 [STREAM] Event {event_count}: scan_completed ({event_dict.get('vulnerabilities_count')} vulns in {event_dict.get('duration_seconds'):.1f}s)")
+                elif event_type == "scan_failed":
+                    logger.error(f"📊 [STREAM] Event {event_count}: scan_failed - {event_dict.get('error')}")
 
                 # Stop if scan completed
-                if event.type in ("scan_completed", "scan_failed"):
+                if event_type in ("scan_completed", "scan_failed"):
+                    logger.info(f"🏁 [STREAM] Stream ended for {scan_id} ({event_count} events)")
                     break
 
         except Exception as e:
-            logger.error(f"Event streaming error for scan {scan_id}: {e}")
+            logger.error(f"❌ [STREAM] Event streaming error for scan {scan_id}: {e}")
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
@@ -190,6 +269,8 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
     session = scans[scan_id]
     event_queue = scan_queues[scan_id]
     start_time = time.time()
+
+    logger.info(f"🔄 [BACKGROUND] Starting background scan {scan_id}")
 
     try:
         session.status = "running"
@@ -203,6 +284,8 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             module_logger = logging.getLogger(logger_name)
             module_logger.addHandler(handler)
 
+        logger.info(f"✅ [BACKGROUND] Logging handlers configured for {scan_id}")
+
         # Create event emitter
         async def emit_event(event_type: str, payload: dict[str, Any]) -> None:
             """Emit event to queue."""
@@ -214,10 +297,16 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             # Create appropriate event class
             if event_type == "scan_started":
                 event = ScanStartedEvent(**payload)
+            elif event_type == "scan_configured":
+                event = ScanConfiguredEvent(**payload)
             elif event_type == "agent_started":
                 event = AgentStartedEvent(**payload)
             elif event_type == "agent_message":
                 event = AgentMessageEvent(**payload)
+            elif event_type == "agent_thinking":
+                event = AgentThinkingEvent(**payload)
+            elif event_type == "agent_token_usage":
+                event = AgentTokenUsageEvent(**payload)
             elif event_type == "agent_completed":
                 event = AgentCompletedEvent(**payload)
             elif event_type == "tool_executed":
@@ -283,11 +372,30 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
         try:
             # Register strix tools
             from strix_pydantic.interface.cli import _register_strix_tools, _build_agents
-            if not request.mock_tools:
+
+            if request.mock_tools:
+                logger.info(f"📦 [TOOLS] Using mock tools (no Docker)")
+            else:
+                logger.info(f"📦 [TOOLS] Registering real tools to {sandbox_url}")
                 _register_strix_tools(tool_registry)
+
+            logger.info(f"✅ [TOOLS] Tool registry initialized with {len(tool_registry._tools)} tools")
 
             # Parse skills
             skill_list = []
+            if request.skills:
+                skill_list = [s.strip() for s in request.skills.split(",") if s.strip()]
+                logger.info(f"🎯 [SKILLS] Active skills: {', '.join(skill_list)}")
+            else:
+                logger.info(f"🎯 [SKILLS] No specific skills requested")
+
+            # Emit scan configured event
+            await emit_event("scan_configured", {
+                "tools_count": len(tool_registry._tools),
+                "skills": skill_list,
+                "sandbox_url": sandbox_url,
+                "mock_tools": request.mock_tools,
+            })
 
             # Create run state
             state = StrixRunState(
@@ -328,7 +436,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             )
 
             # Run orchestrator
-            logger.info(f"Starting orchestrator for scan {scan_id}")
+            logger.info(f"🤖 [BACKGROUND] Starting orchestrator for scan {scan_id}")
             graph = build_orchestrator_graph()
             result = graph.run(state=state, deps=deps)
 
@@ -346,6 +454,12 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             vuln_count = len(state.vulnerabilities) if state else 0
             # Count agent phases completed (typically 3: reconnaissance, exploitation, post_exploitation)
             iterations = len(state.agent_statuses) if state else 0
+
+            logger.info(f"✅ [BACKGROUND] Scan {scan_id} completed successfully")
+            logger.info(f"   Duration: {duration:.1f}s")
+            logger.info(f"   Vulnerabilities: {vuln_count}")
+            logger.info(f"   Iterations: {iterations}")
+
             await emit_event("scan_completed", {
                 "duration_seconds": duration,
                 "vulnerabilities_count": vuln_count,
@@ -353,11 +467,12 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             })
 
         except Exception as e:
-            logger.error(f"Scan {scan_id} orchestrator error: {e}", exc_info=True)
+            logger.error(f"❌ [BACKGROUND] Scan {scan_id} orchestrator error: {e}", exc_info=True)
             session.status = "failed"
             session.error = str(e)
 
             duration = time.time() - start_time
+            logger.error(f"   Duration before failure: {duration:.1f}s")
             await emit_event("scan_failed", {
                 "error": str(e),
                 "duration_seconds": duration,

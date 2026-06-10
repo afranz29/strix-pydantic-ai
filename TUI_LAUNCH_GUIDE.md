@@ -49,9 +49,13 @@ Both methods support these options:
 
 - `--target` (required) - Target URL to scan (e.g., `http://localhost`, `http://example.com`)
 - `--scan-mode` - Scan intensity: `quick` (fast), `standard` (default), `deep` (thorough)
+- `--instruction` - Custom instruction for the agent (overrides default behavior)
+- `--skills` - Comma-separated list of skills to use
 - `--model` - Override LLM model (optional)
+- `--timeout` - Tool execution timeout in seconds (default: 120.0)
 - `--backend-url` - Backend service URL (default: `http://localhost:8000`)
 - `--mock-tools` - Use mock tools for testing (no Docker required)
+- `--verbose` - Enable verbose logging output
 
 ## TUI Controls
 
@@ -98,19 +102,31 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
   --mock-tools
 ```
 
-### Standard scan with custom model:
+### Standard scan with custom model and instructions:
 ```bash
 .venv/bin/python -m strix_pydantic.service.runner \
   --target http://example.com \
   --scan-mode standard \
-  --model claude-sonnet-4-6
+  --model claude-sonnet-4-6 \
+  --instruction "Focus on authentication and API endpoints"
 ```
 
-### Deep scan with real Docker sandbox:
+### Deep scan with specific skills and verbose logging:
 ```bash
 .venv/bin/python -m strix_pydantic.service.runner \
   --target http://testphp.vulnweb.com \
-  --scan-mode deep
+  --scan-mode deep \
+  --skills "web_scanner,network_enumeration" \
+  --verbose
+```
+
+### Custom timeout for slow networks:
+```bash
+.venv/bin/python -m strix_pydantic.service.runner \
+  --target http://localhost \
+  --scan-mode standard \
+  --timeout 300 \
+  --mock-tools
 ```
 
 ## Troubleshooting

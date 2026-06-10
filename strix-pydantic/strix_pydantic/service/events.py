@@ -12,11 +12,14 @@ class ScanEvent(BaseModel):
 
     type: Literal[
         "scan_started",
+        "scan_configured",
         "scan_completed",
         "scan_failed",
         "agent_started",
         "agent_completed",
         "agent_message",
+        "agent_thinking",
+        "agent_token_usage",
         "vulnerability_found",
         "tool_executed",
         "log_message",
@@ -32,6 +35,16 @@ class ScanStartedEvent(ScanEvent):
     target: str
     scan_mode: str
     model: str
+
+
+class ScanConfiguredEvent(ScanEvent):
+    """Emitted after tools and skills are configured."""
+
+    type: Literal["scan_configured"]
+    tools_count: int
+    skills: list[str] = []
+    sandbox_url: str
+    mock_tools: bool
 
 
 class AgentStartedEvent(ScanEvent):
@@ -73,6 +86,27 @@ class VulnerabilityFoundEvent(ScanEvent):
     poc: Optional[str] = None
 
 
+class AgentThinkingEvent(ScanEvent):
+    """Emitted with agent thinking/reasoning from LLM response."""
+
+    type: Literal["agent_thinking"]
+    role: str
+    iteration: int
+    thinking: str
+
+
+class AgentTokenUsageEvent(ScanEvent):
+    """Emitted with LLM token usage statistics."""
+
+    type: Literal["agent_token_usage"]
+    role: str
+    iteration: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+
 class ToolExecutedEvent(ScanEvent):
     """Emitted when tool is executed."""
 
@@ -112,8 +146,11 @@ class ScanFailedEvent(ScanEvent):
 # Union type for all events
 AnyEvent = (
     ScanStartedEvent
+    | ScanConfiguredEvent
     | AgentStartedEvent
     | AgentMessageEvent
+    | AgentThinkingEvent
+    | AgentTokenUsageEvent
     | AgentCompletedEvent
     | VulnerabilityFoundEvent
     | ToolExecutedEvent

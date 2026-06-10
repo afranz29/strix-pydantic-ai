@@ -78,7 +78,7 @@ def _log_agent_result(role: str, result: Any) -> None:
 
 
 def _extract_tool_calls(result: Any) -> list[dict[str, Any]]:
-    """Extract tool calls from agent result messages."""
+    """Extract detailed tool calls and results from agent messages."""
     tools_called = []
     messages = result.all_messages()
 
@@ -88,9 +88,51 @@ def _extract_tool_calls(result: Any) -> list[dict[str, Any]]:
             part_kind = getattr(part, "part_kind", None)
             if part_kind == "tool-call":
                 tool_name = getattr(part, "tool_name", "unknown")
-                tools_called.append({"name": tool_name})
+                args = getattr(part, "args", {})
+
+                # Extract command if it's a terminal_execute or similar
+                command = None
+                if isinstance(args, dict):
+                    command = args.get("command") or args.get("prompt") or str(args)
+
+                tools_called.append({
+                    "name": tool_name,
+                    "command": command,
+                })
+            elif part_kind == "tool-return":
+                tool_name = getattr(part, "tool_name", "unknown")
+                content = getattr(part, "content", None)
+
+                # Extract output summary from tool result
+                output = None
+                if isinstance(content, str):
+                    # Truncate long outputs to first line or 100 chars
+                    first_line = content.split("\n")[0][:100]
+                    output = first_line if first_line else content[:100]
+
+                # Find matching tool call and add result
+                for tool_info in tools_called:
+                    if tool_info.get("name") == tool_name and "output" not in tool_info:
+                        tool_info["output"] = output
+                        break
 
     return tools_called
+
+
+def _extract_thinking(result: Any) -> str:
+    """Extract thinking/reasoning from agent result messages."""
+    messages = result.all_messages()
+
+    for msg in messages:
+        parts = getattr(msg, "parts", []) or []
+        for part in parts:
+            part_kind = getattr(part, "part_kind", None)
+            if part_kind == "thinking":
+                content = getattr(part, "content", "")
+                if content:
+                    return content
+
+    return ""
 
 
 def build_orchestrator_graph() -> Any:
@@ -243,6 +285,28 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         state.agent_statuses[role] = "completed"
         prior_outputs[role] = summary
 
+        # Emit token usage
+        if deps.event_emitter:
+            usage = result.usage
+            await deps.event_emitter("agent_token_usage", {
+                "role": role,
+                "iteration": state.iteration,
+                "input_tokens": usage.input_tokens or 0,
+                "output_tokens": usage.output_tokens or 0,
+                "cache_read_tokens": usage.cache_read_tokens or 0,
+                "cache_write_tokens": usage.cache_write_tokens or 0,
+            })
+
+        # Emit thinking if available
+        if deps.event_emitter:
+            thinking = _extract_thinking(result)
+            if thinking:
+                await deps.event_emitter("agent_thinking", {
+                    "role": role,
+                    "iteration": state.iteration,
+                    "thinking": thinking,
+                })
+
         # Emit agent message with reasoning
         if deps.event_emitter:
             await deps.event_emitter("agent_message", {
@@ -255,11 +319,17 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         if deps.event_emitter:
             tools_called = _extract_tool_calls(result)
             for tool_info in tools_called:
-                await deps.event_emitter("tool_executed", {
+                event_payload = {
                     "role": role,
                     "tool_name": tool_info["name"],
                     "status": "completed",
-                })
+                }
+                if tool_info.get("command"):
+                    event_payload["command"] = tool_info["command"]
+                if tool_info.get("output"):
+                    event_payload["output"] = tool_info["output"]
+
+                await deps.event_emitter("tool_executed", event_payload)
 
         if hasattr(output, "vulnerabilities"):
             for v in output.vulnerabilities:

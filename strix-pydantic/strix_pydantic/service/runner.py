@@ -45,10 +45,10 @@ def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
             "--port",
             str(port),
             "--log-level",
-            "info",
+            "debug",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=None,  # Let output go to console
+        stderr=None,  # Let errors go to console
         text=True,
     )
     return process
@@ -73,12 +73,39 @@ def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
     is_flag=True,
     help="Use mock tools for testing (no Docker required)",
 )
+@click.option(
+    "--instruction",
+    type=str,
+    default="",
+    help="Custom instruction for the agent",
+)
+@click.option(
+    "--skills",
+    type=str,
+    default="",
+    help="Comma-separated list of skills to use",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=120.0,
+    help="Tool execution timeout in seconds",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable verbose output",
+)
 def main(
     target: str,
     scan_mode: str,
     model: Optional[str],
     backend_url: str,
     mock_tools: bool,
+    instruction: str,
+    skills: str,
+    timeout: float,
+    verbose: bool,
 ) -> None:
     """Start backend service and launch Textual TUI client."""
 
@@ -115,6 +142,13 @@ def main(
             tui_args.extend(["--model", model])
         if mock_tools:
             tui_args.append("--mock-tools")
+        if instruction:
+            tui_args.extend(["--instruction", instruction])
+        if skills:
+            tui_args.extend(["--skills", skills])
+        tui_args.extend(["--timeout", str(timeout)])
+        if verbose:
+            tui_args.append("--verbose")
 
         tui_process = subprocess.run(tui_args)
 
