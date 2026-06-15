@@ -6,7 +6,7 @@ The easiest way to run the TUI is with a single command that automatically start
 
 ```bash
 cd strix-pydantic
-.venv/bin/python -m strix_pydantic.service.runner \
+uv run python -m strix_pydantic.service.runner \
   --target http://localhost \
   --scan-mode quick \
   --mock-tools
@@ -25,7 +25,7 @@ If you want to run the backend and client separately for debugging:
 **Terminal 1 - Start the backend:**
 ```bash
 cd strix-pydantic
-.venv/bin/python -m strix_pydantic.service.backend
+uv run python -m strix_pydantic.service.backend
 ```
 
 You should see:
@@ -37,7 +37,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 **Terminal 2 - Launch the TUI client:**
 ```bash
 cd strix-pydantic
-.venv/bin/python -m strix_pydantic.service.tui_client \
+uv run python -m strix_pydantic.service.tui_client \
   --target http://localhost \
   --scan-mode quick \
   --mock-tools
@@ -96,7 +96,7 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
 
 ### Quick scan with mock tools (no Docker):
 ```bash
-.venv/bin/python -m strix_pydantic.service.runner \
+uv run python -m strix_pydantic.service.runner \
   --target http://localhost \
   --scan-mode quick \
   --mock-tools
@@ -104,7 +104,7 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
 
 ### Standard scan with custom model and instructions:
 ```bash
-.venv/bin/python -m strix_pydantic.service.runner \
+uv run python -m strix_pydantic.service.runner \
   --target http://example.com \
   --scan-mode standard \
   --model claude-sonnet-4-6 \
@@ -113,7 +113,7 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
 
 ### Deep scan with specific skills and verbose logging:
 ```bash
-.venv/bin/python -m strix_pydantic.service.runner \
+uv run python -m strix_pydantic.service.runner \
   --target http://testphp.vulnweb.com \
   --scan-mode deep \
   --skills "web_scanner,network_enumeration" \
@@ -122,7 +122,7 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
 
 ### Custom timeout for slow networks:
 ```bash
-.venv/bin/python -m strix_pydantic.service.runner \
+uv run python -m strix_pydantic.service.runner \
   --target http://localhost \
   --scan-mode standard \
   --timeout 300 \
@@ -133,7 +133,7 @@ Once the TUI launches, you'll see four panels arranged in a dashboard:
 
 ### "Backend failed to start"
 - Make sure port 8000 is not in use: `lsof -i :8000`
-- Check Python dependencies are installed: `pip install -e .`
+- Check Python dependencies are installed: `uv sync`
 
 ### "Connection refused"
 - Verify backend is running and listening on the correct port

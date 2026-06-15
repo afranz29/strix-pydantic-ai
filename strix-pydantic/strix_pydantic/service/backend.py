@@ -33,6 +33,11 @@ from strix_pydantic.service.events import (
     ToolExecutedEvent,
     VulnerabilityFoundEvent,
     LogMessageEvent,
+    ToolStartedEvent,
+    ToolOutputEvent,
+    GoalUpdatedEvent,
+    SandboxStatusEvent,
+    CostUpdatedEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -319,6 +324,16 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                 event = ScanCompletedEvent(**payload)
             elif event_type == "scan_failed":
                 event = ScanFailedEvent(**payload)
+            elif event_type == "tool_started":
+                event = ToolStartedEvent(**payload)
+            elif event_type == "tool_output":
+                event = ToolOutputEvent(**payload)
+            elif event_type == "goal_updated":
+                event = GoalUpdatedEvent(**payload)
+            elif event_type == "sandbox_status":
+                event = SandboxStatusEvent(**payload)
+            elif event_type == "cost_updated":
+                event = CostUpdatedEvent(**payload)
             else:
                 return
 
@@ -342,7 +357,9 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
 
         # Initialize sandbox
         try:
+            await emit_event("goal_updated", {"goal_id": "bootstrap", "status": "in_progress"})
             if request.mock_tools:
+                await emit_event("sandbox_status", {"status": "provisioning"})
                 from strix_pydantic.tools.mock_tools import register_mock_tools
                 sandbox_url = "http://127.0.0.1:48081"
                 sandbox_client = None
@@ -350,8 +367,11 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                 register_mock_tools(tool_registry)
                 runtime = None
                 sandbox_info = None
+                await emit_event("sandbox_status", {"status": "ready", "sandbox_url": sandbox_url})
+                await emit_event("goal_updated", {"goal_id": "bootstrap", "status": "completed"})
             else:
                 run_id = scan_id
+                await emit_event("sandbox_status", {"status": "provisioning"})
                 sandbox_url, auth_token, runtime, sandbox_info = await initialize_sandbox(run_id, request.sandbox_url or None)
                 sandbox_client = SandboxClient(
                     base_url=sandbox_url,
@@ -359,8 +379,18 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                     execute_timeout=120.0,
                 )
                 tool_registry = ToolRegistry()
+                await emit_event("sandbox_status", {"status": "ready", "sandbox_url": sandbox_url})
+                await emit_event("goal_updated", {"goal_id": "bootstrap", "status": "completed"})
 
         except Exception as e:
+            try:
+                await emit_event("sandbox_status", {"status": "unreachable", "error": str(e)})
+            except Exception:
+                pass
+            try:
+                await emit_event("goal_updated", {"goal_id": "bootstrap", "status": "failed"})
+            except Exception:
+                pass
             await emit_event("scan_failed", {
                 "error": f"Failed to initialize sandbox: {e}",
                 "duration_seconds": time.time() - start_time,
@@ -490,6 +520,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             # Cleanup
             if not request.mock_tools and runtime and sandbox_info:
                 try:
+                    await emit_event("sandbox_status", {"status": "destroyed"})
                     await runtime.destroy_sandbox(sandbox_info["workspace_id"])
                 except Exception as e:
                     logger.warning(f"Failed to cleanup sandbox: {e}")

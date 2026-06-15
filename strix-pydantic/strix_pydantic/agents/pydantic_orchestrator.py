@@ -233,6 +233,13 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
         state.agent_statuses[role] = "running"
 
+        # Emit goal in progress
+        if deps.event_emitter:
+            await deps.event_emitter("goal_updated", {
+                "goal_id": role,
+                "status": "in_progress",
+            })
+
         # Track vulnerabilities count before this agent runs
         vuln_count_before = len(state.vulnerabilities)
 
@@ -263,16 +270,33 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         logger.debug(f"📝 [LLM INPUT] role={role} user_prompt={prompt}")
         _log_message_sequence(role, history, label="message_history_before_run")
 
+        from pydantic_ai.usage import UsageLimits
+
+        # Determine request limit based on scan mode to avoid premature usage limit exhaustion
+        request_limits = {
+            "quick": 1000,
+            "standard": 5000,
+            "deep": 10000,
+        }
+        req_limit = request_limits.get(state.scan_mode, 500)
+        usage_limits = UsageLimits(request_limit=req_limit)
+
         try:
             result = await agent.run(
                 user_prompt=prompt,
                 message_history=history,
                 deps=deps,
+                usage_limits=usage_limits,
             )
         except Exception as e:
             state.agent_statuses[role] = "failed"
             logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
             state.error = f"Agent execution error: {e}"
+            if deps.event_emitter:
+                await deps.event_emitter("goal_updated", {
+                    "goal_id": role,
+                    "status": "failed",
+                })
             return End(f"Aborted: {state.error}")
 
         _log_agent_result(role, result)
@@ -285,6 +309,13 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         state.agent_statuses[role] = "completed"
         prior_outputs[role] = summary
 
+        # Emit goal completed
+        if deps.event_emitter:
+            await deps.event_emitter("goal_updated", {
+                "goal_id": role,
+                "status": "completed",
+            })
+
         # Emit token usage
         if deps.event_emitter:
             usage = result.usage
@@ -295,6 +326,43 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 "output_tokens": usage.output_tokens or 0,
                 "cache_read_tokens": usage.cache_read_tokens or 0,
                 "cache_write_tokens": usage.cache_write_tokens or 0,
+            })
+
+        # Calculate cost
+        if deps.event_emitter and result.usage:
+            usage = result.usage
+            in_tokens = usage.input_tokens or 0
+            out_tokens = usage.output_tokens or 0
+            cache_read = usage.cache_read_tokens or 0
+            cache_write = usage.cache_write_tokens or 0
+
+            # Simple rate card per 1,000,000 tokens
+            model = deps.run_config.model_name.lower()
+            if "claude-3-5-sonnet" in model:
+                in_rate, out_rate = 3.00, 15.00
+            elif "claude-3-5-haiku" in model or "claude-haiku-4-5" in model:
+                in_rate, out_rate = 0.25, 1.25
+            elif "gemini-2.0-flash" in model or "gemini-3.5-flash" in model:
+                in_rate, out_rate = 0.075, 0.30
+            elif "gpt-4o-mini" in model:
+                in_rate, out_rate = 0.15, 0.60
+            elif "gpt-4o" in model:
+                in_rate, out_rate = 2.50, 10.00
+            else:
+                in_rate, out_rate = 0.15, 0.60  # default rate
+
+            cost_increment = (
+                (in_tokens - cache_read) * in_rate +
+                cache_read * in_rate * 0.1 +
+                out_tokens * out_rate
+            ) / 1_000_000.0
+
+            state.total_cost += cost_increment
+
+            await deps.event_emitter("cost_updated", {
+                "cost_increment": cost_increment,
+                "cumulative_cost": state.total_cost,
+                "model_name": deps.run_config.model_name,
             })
 
         # Emit thinking if available

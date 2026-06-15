@@ -68,6 +68,7 @@ class StrixRunState:
     # Terminal state
     final_summary: str | None = None
     error: str | None = None
+    total_cost: float = 0.0
 
 
 @dataclass

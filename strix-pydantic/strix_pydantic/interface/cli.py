@@ -38,7 +38,11 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
         Path to log file
     """
     if log_file is None:
-        log_file = Path.cwd() / f"strix_{uuid.uuid4().hex[:8]}.log"
+        logs_dir = Path(__file__).parent.parent.parent / "logs"
+        log_file = logs_dir / f"strix_{uuid.uuid4().hex[:8]}.log"
+
+    # Create logs directory if needed
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)  # capture everything; handlers filter by level
@@ -64,16 +68,19 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
 
 @click.command(no_args_is_help=True)
 @click.option(
+    "-t",
     "--target",
     required=True,
     type=str,
-    help="Target URL or host to scan",
+    multiple=True,
+    help="Target URL or host to scan (can be specified multiple times)",
 )
 @click.option(
+    "-m",
     "--scan-mode",
     type=click.Choice(["quick", "standard", "deep"]),
-    default="standard",
-    help="Scan intensity level",
+    default="deep",
+    help="Scan intensity level (default: deep)",
 )
 @click.option(
     "--skills",
@@ -122,6 +129,12 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
     help="Custom instruction for the agent (overrides default target/scan-mode prompt)",
 )
 @click.option(
+    "--instruction-file",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help="Path to a file containing detailed custom instructions for the penetration test.",
+)
+@click.option(
     "--confirm",
     is_flag=True,
     help="Pause and ask for confirmation between agent phases",
@@ -131,8 +144,33 @@ def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Pat
     default=True,
     help="Use Textual UI for progress display (default: enabled)",
 )
+@click.option(
+    "-n",
+    "--non-interactive",
+    is_flag=True,
+    help="Run in non-interactive mode (no TUI, exits on completion).",
+)
+@click.option(
+    "--scope-mode",
+    type=click.Choice(["auto", "diff", "full"]),
+    default="auto",
+    help="Scope mode for code targets (ignored in pydantic version)",
+)
+@click.option(
+    "--diff-base",
+    type=str,
+    default=None,
+    help="Target branch or commit to compare against (ignored in pydantic version)",
+)
+@click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a custom config file (ignored in pydantic version)",
+)
+@click.version_option(version="0.1.0-pydantic")
 def scan(
-    target: str,
+    target: tuple[str, ...],
     scan_mode: str,
     skills: str,
     model: Optional[str],
@@ -142,8 +180,13 @@ def scan(
     verbose: bool,
     mock_tools: bool,
     instruction: str,
+    instruction_file: Optional[str],
     confirm: bool,
     ui: bool,
+    non_interactive: bool,
+    scope_mode: str,
+    diff_base: Optional[str],
+    config: Optional[str],
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -151,169 +194,193 @@ def scan(
     Example:
         strix --target https://example.com --scan-mode standard --skills reconnaissance
     """
-    # Setup logging
-    if log_file:
-        log_path = setup_logging(Path(log_file), verbose=verbose)
-    else:
-        log_path = setup_logging(verbose=verbose)
+    if instruction and instruction_file:
+        raise click.UsageError("Cannot specify both --instruction and --instruction-file. Use one or the other.")
 
-    # Initialize TUI if requested
-    tui_app = StrixTUIApp(use_ui=ui)
-    if ui:
-        tui_app.start()
+    if instruction_file:
+        try:
+            with open(instruction_file, "r", encoding="utf-8") as f:
+                instruction = f.read().strip()
+        except Exception as e:
+            raise click.ClickException(f"Failed to read instruction file '{instruction_file}': {e}")
 
-    # Print startup lines
-    click.echo(f"📋 Strix Non-Interactive Scanner")
-    click.echo(f"   Log file: {log_path}")
+    # Resolve interactive/non-interactive UI setting
+    if non_interactive:
+        ui = False
 
-    # Resolve model config
-    try:
-        if model:
-            model_spec = normalize_model_spec(model)
-            model_display = model
+    overall_exit_code = 0
+
+    for idx, single_target in enumerate(target, 1):
+        if len(target) > 1:
+            click.echo(f"\n📦 Scanning Target {idx}/{len(target)}: {single_target}")
+
+        # Setup logging
+        if log_file:
+            log_path = setup_logging(Path(log_file), verbose=verbose)
         else:
-            model_spec, model_display = resolve_model_config()
+            log_path = setup_logging(verbose=verbose)
 
-        click.echo(f"   Model: {model_display}")
-    except Exception as e:
-        click.echo(f"❌ Failed to resolve model config: {e}", err=True)
-        sys.exit(1)
-
-    # Parse skills
-    skill_list = [s.strip() for s in skills.split(",") if s.strip()] if skills else []
-
-    # Create run state
-    run_id = f"run_{uuid.uuid4().hex[:12]}"
-    state = StrixRunState(
-        run_id=run_id,
-        target=target,
-        scan_mode=scan_mode,
-        active_skills=skill_list,
-        instruction=instruction,
-    )
-
-    # Create run config
-    run_config = RunConfig(
-        model_name=model_spec,
-        scan_mode=scan_mode,
-        non_interactive=True,
-        execute_timeout=timeout,
-    )
-
-    runtime = None
-    sandbox_info = None
-    sandbox_client = None
-
-    # Build agents and dependencies
-    try:
-        from strix_pydantic.runtime.sandbox_client import SandboxClient
-
-        tool_registry = ToolRegistry()
-
-        # Register mock tools if requested
-        if mock_tools:
-            from strix_pydantic.tools.mock_tools import register_mock_tools
-
-            click.echo("📦 Using mock tools (testing mode)")
-            register_mock_tools(tool_registry)
-            sandbox_url = sandbox_url or "http://127.0.0.1:48081"
-            sandbox_client = None
-        else:
-            sandbox_url, auth_token, runtime, sandbox_info = asyncio.run(
-                initialize_sandbox(run_id, sandbox_url)
-            )
-            sandbox_client = SandboxClient(
-                base_url=sandbox_url,
-                auth_token=auth_token,
-                execute_timeout=run_config.execute_timeout,
-            )
-            if sandbox_info is None:
-                click.echo(f"🐳 Using external sandbox at {sandbox_url}")
-            else:
-                click.echo(f"🐳 Created Docker sandbox at {sandbox_url}")
-
-        if not mock_tools:
-            _register_strix_tools(tool_registry)
-
-        agents = _build_agents(
-            model_spec,
-            skill_list,
-            run_config,
-            tool_registry,
-            sandbox_client=sandbox_client,
-            run_state=state,
-        )
-
-        # Wire up TUI callbacks if UI is enabled
-        ui_callbacks = None
+        # Initialize TUI if requested
+        tui_app = StrixTUIApp(use_ui=ui)
         if ui:
-            ui_callbacks = {
-                "update_agent_status": tui_app.update_agent_status,
-                "add_output": tui_app.add_log,
-                "show_vulnerability": tui_app.show_vulnerability,
-            }
+            tui_app.start()
 
-        deps = StrixDeps(
-            sandbox_url=sandbox_url,
-            tool_registry=tool_registry,
-            run_config=run_config,
-            agents=agents,
-            sandbox_client=sandbox_client,
-            confirm_proceed=_make_confirm_callback() if confirm else None,
-            ui_update_agent_status=ui_callbacks["update_agent_status"] if ui_callbacks else None,
-            ui_add_output=ui_callbacks["add_output"] if ui_callbacks else None,
-            ui_show_vulnerability=ui_callbacks["show_vulnerability"] if ui_callbacks else None,
+        # Print startup lines
+        click.echo(f"📋 Strix Non-Interactive Scanner")
+        click.echo(f"   Log file: {log_path}")
+
+        # Resolve model config
+        try:
+            if model:
+                model_spec = normalize_model_spec(model)
+                model_display = model
+            else:
+                model_spec, model_display = resolve_model_config()
+
+            click.echo(f"   Model: {model_display}")
+        except Exception as e:
+            click.echo(f"❌ Failed to resolve model config: {e}", err=True)
+            tui_app.stop()
+            sys.exit(1)
+
+        # Parse skills
+        skill_list = [s.strip() for s in skills.split(",") if s.strip()] if skills else []
+
+        # Create run state
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        state = StrixRunState(
+            run_id=run_id,
+            target=single_target,
+            scan_mode=scan_mode,
+            active_skills=skill_list,
+            instruction=instruction,
         )
 
-        click.echo(f"✅ Initialized {len(agents)} agent roles")
+        # Create run config
+        run_config = RunConfig(
+            model_name=model_spec,
+            scan_mode=scan_mode,
+            non_interactive=True,
+            execute_timeout=timeout,
+        )
 
-    except Exception as e:
-        click.echo(f"❌ Failed to initialize agents: {e}", err=True)
-        logger.error(f"Agent initialization error: {e}", exc_info=True)
+        runtime = None
+        sandbox_info = None
+        sandbox_client = None
+
+        # Build agents and dependencies
+        try:
+            from strix_pydantic.runtime.sandbox_client import SandboxClient
+
+            tool_registry = ToolRegistry()
+
+            # Register mock tools if requested
+            if mock_tools:
+                from strix_pydantic.tools.mock_tools import register_mock_tools
+
+                click.echo("📦 Using mock tools (testing mode)")
+                register_mock_tools(tool_registry)
+                sandbox_url_resolved = sandbox_url or "http://127.0.0.1:48081"
+                sandbox_client = None
+            else:
+                sandbox_url_resolved, auth_token, runtime, sandbox_info = asyncio.run(
+                    initialize_sandbox(run_id, sandbox_url)
+                )
+                sandbox_client = SandboxClient(
+                    base_url=sandbox_url_resolved,
+                    auth_token=auth_token,
+                    execute_timeout=run_config.execute_timeout,
+                )
+                if sandbox_info is None:
+                    click.echo(f"🐳 Using external sandbox at {sandbox_url_resolved}")
+                else:
+                    click.echo(f"🐳 Created Docker sandbox at {sandbox_url_resolved}")
+
+            if not mock_tools:
+                _register_strix_tools(tool_registry)
+
+            agents = _build_agents(
+                model_spec,
+                skill_list,
+                run_config,
+                tool_registry,
+                sandbox_client=sandbox_client,
+                run_state=state,
+            )
+
+            # Wire up TUI callbacks if UI is enabled
+            ui_callbacks = None
+            if ui:
+                ui_callbacks = {
+                    "update_agent_status": tui_app.update_agent_status,
+                    "add_output": tui_app.add_log,
+                    "show_vulnerability": tui_app.show_vulnerability,
+                }
+
+            deps = StrixDeps(
+                sandbox_url=sandbox_url_resolved,
+                tool_registry=tool_registry,
+                run_config=run_config,
+                agents=agents,
+                sandbox_client=sandbox_client,
+                confirm_proceed=_make_confirm_callback() if confirm else None,
+                ui_update_agent_status=ui_callbacks["update_agent_status"] if ui_callbacks else None,
+                ui_add_output=ui_callbacks["add_output"] if ui_callbacks else None,
+                ui_show_vulnerability=ui_callbacks["show_vulnerability"] if ui_callbacks else None,
+            )
+
+            click.echo(f"✅ Initialized {len(agents)} agent roles")
+
+        except Exception as e:
+            click.echo(f"❌ Failed to initialize agents: {e}", err=True)
+            logger.error(f"Agent initialization error: {e}", exc_info=True)
+            if runtime is not None:
+                runtime.cleanup()
+            tui_app.stop()
+            overall_exit_code = 1
+            continue
+
+        interrupted = False
+        target_exit_code = 0
+
+        # Register signal handler for emergency cleanup before starting the scan
         if runtime is not None:
-            runtime.cleanup()
-        sys.exit(1)
+            def _signal_cleanup(signum, frame):
+                runtime.cleanup()
+                raise KeyboardInterrupt
 
-    interrupted = False
-    exit_code = 0
+            signal.signal(signal.SIGTERM, _signal_cleanup)
+            signal.signal(signal.SIGINT, _signal_cleanup)
 
-    # Register signal handler for emergency cleanup before starting the scan
-    if runtime is not None:
-        def _signal_cleanup(signum, frame):
-            runtime.cleanup()
-            raise KeyboardInterrupt
+        # Run orchestrator
+        try:
+            click.echo(f"\n🚀 Starting scan for {single_target}")
+            _run_orchestrator(state, deps, verbose)
+        except KeyboardInterrupt:
+            interrupted = True
+            state.error = state.error or "Interrupted by user"
+            click.echo("\n⏹  Scan interrupted. Summarizing findings collected so far...")
+            logger.info("Scan interrupted by user")
+        except Exception as e:
+            click.echo(f"❌ Scan failed: {e}", err=True)
+            logger.error(f"Orchestrator error: {e}", exc_info=True)
+            state.error = state.error or f"Scan failed: {e}"
+            target_exit_code = 1
+        finally:
+            if runtime and sandbox_info:
+                try:
+                    asyncio.run(runtime.destroy_sandbox(sandbox_info["workspace_id"]))
+                except Exception as e:
+                    logger.warning("Failed to destroy sandbox: %s", e, exc_info=True)
 
-        signal.signal(signal.SIGTERM, _signal_cleanup)
-        signal.signal(signal.SIGINT, _signal_cleanup)
+        # Print final summary and TUI display
+        _print_final_summary(state, tui_app)
+        tui_app.stop()
 
-    # Run orchestrator
-    try:
-        click.echo(f"\n🚀 Starting scan for {target}")
-        _run_orchestrator(state, deps, verbose)
-    except KeyboardInterrupt:
-        interrupted = True
-        state.error = state.error or "Interrupted by user"
-        click.echo("\n⏹  Scan interrupted. Summarizing findings collected so far...")
-        logger.info("Scan interrupted by user")
-    except Exception as e:
-        click.echo(f"❌ Scan failed: {e}", err=True)
-        logger.error(f"Orchestrator error: {e}", exc_info=True)
-        state.error = state.error or f"Scan failed: {e}"
-        exit_code = 1
-    finally:
-        if runtime and sandbox_info:
-            try:
-                asyncio.run(runtime.destroy_sandbox(sandbox_info["workspace_id"]))
-            except Exception as e:
-                logger.warning("Failed to destroy sandbox: %s", e, exc_info=True)
-
-    # Print final summary and TUI display
-    _print_final_summary(state, tui_app)
-    tui_app.stop()
-    if interrupted:
-        sys.exit(130)
-    if exit_code:
-        sys.exit(exit_code)
+        if interrupted:
+            sys.exit(130)
+        if target_exit_code:
+            overall_exit_code = target_exit_code
 
 
 def _make_confirm_callback():
@@ -464,10 +531,10 @@ def _build_agents(
                 )
                 logger.info(f"Built sandbox toolset for {role} with {len(tool_registry._tools)} tools")
             else:
-                from pydantic_ai import FunctionToolset
+                from strix_pydantic.tools.tool_wrapper import build_direct_tools_from_registry
 
+                registry_toolset = build_direct_tools_from_registry(tool_registry)
                 parent_tools = tool_registry.get_tools_for_context("parent")
-                registry_toolset = FunctionToolset(tools=[td.callable for td in parent_tools.values()])
                 logger.info(f"Built direct toolset for {role} with {len(parent_tools)} mock tools")
 
         # Build agent with skill-derived instructions and model spec

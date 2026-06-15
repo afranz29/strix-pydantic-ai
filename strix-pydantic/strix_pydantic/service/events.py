@@ -23,6 +23,11 @@ class ScanEvent(BaseModel):
         "vulnerability_found",
         "tool_executed",
         "log_message",
+        "tool_started",
+        "tool_output",
+        "goal_updated",
+        "sandbox_status",
+        "cost_updated",
     ]
     timestamp: datetime
     scan_id: str
@@ -143,6 +148,50 @@ class ScanFailedEvent(ScanEvent):
     duration_seconds: float
 
 
+class ToolStartedEvent(ScanEvent):
+    """Emitted when a tool starts execution."""
+
+    type: Literal["tool_started"]
+    tool_name: str
+    command: str
+    role: str
+
+
+class ToolOutputEvent(ScanEvent):
+    """Emitted when a tool produces output."""
+
+    type: Literal["tool_output"]
+    tool_name: str
+    output: str
+    role: str
+
+
+class GoalUpdatedEvent(ScanEvent):
+    """Emitted to update the status of a high-level scan goal."""
+
+    type: Literal["goal_updated"]
+    goal_id: str
+    status: Literal["pending", "in_progress", "completed", "failed"]
+
+
+class SandboxStatusEvent(ScanEvent):
+    """Emitted when sandbox status changes."""
+
+    type: Literal["sandbox_status"]
+    status: Literal["provisioning", "ready", "unreachable", "destroyed"]
+    sandbox_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CostUpdatedEvent(ScanEvent):
+    """Emitted when LLM cost is updated."""
+
+    type: Literal["cost_updated"]
+    cost_increment: float
+    cumulative_cost: float
+    model_name: str
+
+
 # Union type for all events
 AnyEvent = (
     ScanStartedEvent
@@ -157,4 +206,9 @@ AnyEvent = (
     | LogMessageEvent
     | ScanCompletedEvent
     | ScanFailedEvent
+    | ToolStartedEvent
+    | ToolOutputEvent
+    | GoalUpdatedEvent
+    | SandboxStatusEvent
+    | CostUpdatedEvent
 )

@@ -26,7 +26,11 @@ async def wait_for_backend(backend_url: str, timeout: int = 10) -> bool:
     return False
 
 
-def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
+def run_backend(
+    backend_url: str = "http://0.0.0.0:8000",
+    stdout=None,
+    stderr=None,
+) -> subprocess.Popen:
     """Start the backend service in a subprocess."""
     # Parse host and port
     url_parts = backend_url.replace("http://", "").split(":")
@@ -47,20 +51,28 @@ def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
             "--log-level",
             "debug",
         ],
-        stdout=None,  # Let output go to console
-        stderr=None,  # Let errors go to console
+        stdout=stdout,
+        stderr=stderr,
         text=True,
     )
     return process
 
 
 @click.command()
-@click.option("--target", required=True, help="Target URL to scan")
 @click.option(
+    "-t",
+    "--target",
+    required=True,
+    type=str,
+    multiple=True,
+    help="Target URL to scan (can be specified multiple times)",
+)
+@click.option(
+    "-m",
     "--scan-mode",
     type=click.Choice(["quick", "standard", "deep"]),
-    default="standard",
-    help="Scan intensity level",
+    default="deep",
+    help="Scan intensity level (default: deep)",
 )
 @click.option("--model", type=str, default=None, help="Override LLM model")
 @click.option(
@@ -80,6 +92,12 @@ def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
     help="Custom instruction for the agent",
 )
 @click.option(
+    "--instruction-file",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help="Path to a file containing detailed custom instructions for the penetration test.",
+)
+@click.option(
     "--skills",
     type=str,
     default="",
@@ -96,22 +114,77 @@ def run_backend(backend_url: str = "http://0.0.0.0:8000") -> subprocess.Popen:
     is_flag=True,
     help="Enable verbose output",
 )
+@click.option(
+    "-n",
+    "--non-interactive",
+    is_flag=True,
+    help="Run in non-interactive mode (ignored in TUI runner)",
+)
+@click.option(
+    "--scope-mode",
+    type=click.Choice(["auto", "diff", "full"]),
+    default="auto",
+    help="Scope mode for code targets (ignored in TUI runner)",
+)
+@click.option(
+    "--diff-base",
+    type=str,
+    default=None,
+    help="Target branch or commit to compare against (ignored in TUI runner)",
+)
+@click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a custom config file (ignored in TUI runner)",
+)
+@click.version_option(version="0.1.0-pydantic")
 def main(
-    target: str,
+    target: tuple[str, ...],
     scan_mode: str,
     model: Optional[str],
     backend_url: str,
     mock_tools: bool,
     instruction: str,
+    instruction_file: Optional[str],
     skills: str,
     timeout: float,
     verbose: bool,
+    non_interactive: bool,
+    scope_mode: str,
+    diff_base: Optional[str],
+    config: Optional[str],
 ) -> None:
     """Start backend service and launch Textual TUI client."""
+    import os
+
+    if instruction and instruction_file:
+        raise click.UsageError("Cannot specify both --instruction and --instruction-file. Use one or the other.")
+
+    if instruction_file:
+        try:
+            with open(instruction_file, "r", encoding="utf-8") as f:
+                instruction = f.read().strip()
+        except Exception as e:
+            raise click.ClickException(f"Failed to read instruction file '{instruction_file}': {e}")
+
+    # Redirect backend output to log file to avoid flashing on top of TUI
+    logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(logs_dir, "strix_backend.log")
+    backend_log = None
+    try:
+        backend_log = open(log_path, "w", encoding="utf-8")
+        stdout_stream = backend_log
+        stderr_stream = backend_log
+    except Exception as e:
+        click.echo(f"⚠️  Could not open backend log file ({e}), redirecting to DEVNULL", err=True)
+        stdout_stream = subprocess.DEVNULL
+        stderr_stream = subprocess.DEVNULL
 
     # Start backend
     click.echo("🚀 Starting backend service...", err=True)
-    backend_process = run_backend(backend_url)
+    backend_process = run_backend(backend_url, stdout=stdout_stream, stderr=stderr_stream)
 
     try:
         # Wait for backend to be ready
@@ -120,40 +193,51 @@ def main(
 
         if not ready:
             click.echo("❌ Backend failed to start or didn't respond in time", err=True)
+            if backend_log:
+                click.echo(f"ℹ️  Check backend logs for details: {log_path}", err=True)
             backend_process.terminate()
             sys.exit(1)
 
         click.echo("✅ Backend is ready!", err=True)
-        click.echo("🎨 Launching TUI client...\n", err=True)
 
-        # Launch TUI client
-        tui_args = [
-            sys.executable,
-            "-m",
-            "strix_pydantic.service.tui_client",
-            "--target",
-            target,
-            "--scan-mode",
-            scan_mode,
-            "--backend-url",
-            backend_url,
-        ]
-        if model:
-            tui_args.extend(["--model", model])
-        if mock_tools:
-            tui_args.append("--mock-tools")
-        if instruction:
-            tui_args.extend(["--instruction", instruction])
-        if skills:
-            tui_args.extend(["--skills", skills])
-        tui_args.extend(["--timeout", str(timeout)])
-        if verbose:
-            tui_args.append("--verbose")
+        overall_exit_code = 0
 
-        tui_process = subprocess.run(tui_args)
+        # Run TUI client sequentially for each target
+        for idx, single_target in enumerate(target, 1):
+            if len(target) > 1:
+                click.echo(f"\n🎨 Launching TUI client for target {idx}/{len(target)}: {single_target}...\n", err=True)
+            else:
+                click.echo("🎨 Launching TUI client...\n", err=True)
 
-        # Exit with TUI exit code
-        sys.exit(tui_process.returncode)
+            tui_args = [
+                sys.executable,
+                "-m",
+                "strix_pydantic.service.tui_client",
+                "--target",
+                single_target,
+                "--scan-mode",
+                scan_mode,
+                "--backend-url",
+                backend_url,
+            ]
+            if model:
+                tui_args.extend(["--model", model])
+            if mock_tools:
+                tui_args.append("--mock-tools")
+            if instruction:
+                tui_args.extend(["--instruction", instruction])
+            if skills:
+                tui_args.extend(["--skills", skills])
+            tui_args.extend(["--timeout", str(timeout)])
+            if verbose:
+                tui_args.append("--verbose")
+
+            tui_process = subprocess.run(tui_args)
+            if tui_process.returncode != 0:
+                overall_exit_code = tui_process.returncode
+
+        # Exit with accumulated exit code
+        sys.exit(overall_exit_code)
 
     except KeyboardInterrupt:
         click.echo("\n\n⏹  Interrupted by user", err=True)
@@ -166,6 +250,13 @@ def main(
             backend_process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             backend_process.kill()
+
+        # Close log file if opened
+        if backend_log:
+            try:
+                backend_log.close()
+            except Exception:
+                pass
         click.echo("✅ Cleanup complete", err=True)
 
 

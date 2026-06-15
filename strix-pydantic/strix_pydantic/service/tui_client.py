@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import click
 import httpx
+from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -20,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging(log_file: Optional[Path] = None) -> Path:
-    """Configure logging to file and console."""
+    """Configure logging to file (console logging is disabled to avoid corrupting the TUI)."""
     if log_file is None:
-        log_file = Path.cwd() / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        logs_dir = Path(__file__).parent.parent.parent / "logs"
+        log_file = logs_dir / f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
     # Create logs directory if needed
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -36,8 +38,10 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
     )
     file_handler.setFormatter(formatter)
 
-    # Get root logger and add handler
+    # Get root logger, clear existing handlers (like console handlers), and add file handler
     root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
     root_logger.setLevel(logging.DEBUG)
     root_logger.addHandler(file_handler)
 
@@ -49,36 +53,37 @@ def setup_logging(log_file: Optional[Path] = None) -> Path:
 
 
 class AgentsPanel(Static):
-    """Display agent status with running/completed/initialized indicators."""
+    """Display agent status and high-level scan goals."""
 
-    agents = reactive({})
-    current_agent = reactive("")
+    goals = reactive({})
 
     def render(self) -> Text:
-        """Render agent status panel (matches original Strix styling)."""
+        """Render goals status panel."""
         content = Text()
 
-        agent_roles = ["reconnaissance", "exploitation", "post_exploitation"]
-        for role in agent_roles:
-            agent_data = self.agents.get(role, {})
-            status = agent_data.get("status", "initialized")
-            iterations = agent_data.get("iterations", 0)
+        goal_ids = ["bootstrap", "reconnaissance", "exploitation", "post_exploitation"]
+        goal_labels = {
+            "bootstrap": "Bootstrap Sandbox",
+            "reconnaissance": "Reconnaissance Phase",
+            "exploitation": "Exploitation Phase",
+            "post_exploitation": "Post-Exploitation Phase",
+        }
+        for goal in goal_ids:
+            status = self.goals.get(goal, "pending")
+            label = goal_labels.get(goal, goal)
 
-            # Status indicators (matching original Strix)
+            # Status indicators
             status_indicators = {
                 "completed": ("🟢", "green"),
-                "running": ("⚪", "cyan"),
-                "initialized": ("○", "dim"),
+                "in_progress": ("⚪", "cyan"),
+                "pending": ("○", "dim"),
                 "failed": ("🔴", "red"),
             }
 
             icon, style = status_indicators.get(status, ("○", "dim"))
+            text_line = f"{icon} {label}\n"
 
-            # Build text line with iteration count
-            text_line = f"{icon} {role} (iter {iterations})\n"
-
-            # Apply bold if current agent, otherwise just status style
-            if role == self.current_agent:
+            if status == "in_progress":
                 content.append(text_line, style=f"{style} bold")
             else:
                 content.append(text_line, style=style)
@@ -91,16 +96,32 @@ class ActivityPanel(Static):
 
     target = reactive("")
     scan_mode = reactive("")
+    model_name = reactive("")
     current_status = reactive("initializing")
     elapsed_seconds = reactive(0)
+    estimated_cost = reactive(0.0)
+    sandbox_status = reactive("unknown")
 
     def render(self) -> Text:
         """Render activity status panel."""
         content = Text()
         content.append(f"Target: {self.target}\n")
         content.append(f"Mode: {self.scan_mode}\n")
+        content.append(f"Model: {self.model_name}\n")
         content.append(f"Status: {self.current_status}\n")
+
+        # Sandbox status rendering
+        sandbox_style = {
+            "ready": "green",
+            "provisioning": "cyan",
+            "unreachable": "red",
+            "destroyed": "dim",
+        }.get(self.sandbox_status, "dim")
+        content.append("Sandbox: ")
+        content.append(f"{self.sandbox_status}\n", style=sandbox_style)
+
         content.append(f"Elapsed: {self.elapsed_seconds}s\n")
+        content.append(f"Est. Cost: ${self.estimated_cost:.5f}\n", style="yellow")
 
         return content
 
@@ -127,10 +148,13 @@ class AgentActivityPanel(VerticalScroll):
         content_widget = self.query_one("#activity-content", Static)
         content = Text()
 
-        if not self.activity_log:
+        # Cap at the last 150 logs to keep the UI extremely snappy
+        display_log = self.activity_log[-150:]
+
+        if not display_log:
             content.append("Waiting for agent activity...", style="dim")
         else:
-            for entry in self.activity_log:
+            for entry in display_log:
                 level = entry.get("level", "info")
                 message = entry.get("message", "")
 
@@ -172,6 +196,7 @@ class AgentActivityPanel(VerticalScroll):
                             content.append(line + "\n", style=color)
 
         content_widget.update(content)
+        self.call_later(self.scroll_end, animate=False)
 
 
 class VulnerabilitiesPanel(VerticalScroll):
@@ -221,6 +246,7 @@ class VulnerabilitiesPanel(VerticalScroll):
                 content.append("-" * 60 + "\n", style="dim")
 
         content_widget.update(content)
+        self.call_later(self.scroll_end, animate=False)
 
 
 class VulnerabilityDetailModal(ModalScreen):
@@ -247,7 +273,7 @@ class VulnerabilityDetailModal(ModalScreen):
     def compose(self) -> ComposeResult:
         """Compose the detail modal."""
         content = Text()
-        content.append(f"[bold]{self.vuln.get('title', 'Unknown')}[/bold]\n\n")
+        content.append(f"{self.vuln.get('title', 'Unknown')}\n\n", style="bold")
 
         severity = self.vuln.get("severity", "info")
         severity_colors = {
@@ -258,19 +284,24 @@ class VulnerabilityDetailModal(ModalScreen):
             "info": "cyan",
         }
         color = severity_colors.get(severity, "white")
-        content.append(f"[bold {color}]Severity:[/bold {color}] {severity.upper()}\n\n")
+        content.append("Severity: ", style=f"bold {color}")
+        content.append(f"{severity.upper()}\n\n")
 
         description = self.vuln.get("description", "")
-        content.append(f"[bold]Description:[/bold]\n{description}\n\n")
+        content.append("Description:\n", style="bold")
+        content.append(f"{description}\n\n")
 
         if self.vuln.get("cve_id"):
-            content.append(f"[bold]CVE:[/bold] {self.vuln['cve_id']}\n\n")
+            content.append("CVE: ", style="bold")
+            content.append(f"{self.vuln['cve_id']}\n\n")
 
         if self.vuln.get("parameter"):
-            content.append(f"[bold]Parameter:[/bold] {self.vuln['parameter']}\n\n")
+            content.append("Parameter: ", style="bold")
+            content.append(f"{self.vuln['parameter']}\n\n")
 
         if self.vuln.get("poc"):
-            content.append(f"[bold]POC:[/bold] {self.vuln['poc']}\n")
+            content.append("POC:\n", style="bold")
+            content.append(f"{self.vuln['poc']}\n")
 
         yield Static(Panel(content, title="Vulnerability Details", border_style=color))
         yield Button("Close [dim](ESC)[/dim]", id="close-button")
@@ -282,6 +313,146 @@ class VulnerabilityDetailModal(ModalScreen):
 
     def on_key(self, event) -> None:
         """Handle keyboard shortcuts."""
+        if event.key == "escape":
+            self.app.pop_screen()
+
+
+class ScanSummaryModal(ModalScreen):
+    """Modal screen showing the scan summary report."""
+
+    DEFAULT_CSS = """
+    ScanSummaryModal {
+        align: center middle;
+    }
+
+    ScanSummaryModal > Vertical {
+        width: 85%;
+        height: 85%;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #summary-scroll {
+        height: 1fr;
+        margin: 1 0;
+    }
+
+    #summary-close-btn {
+        align-horizontal: center;
+        width: 20;
+        margin-top: 1;
+    }
+
+    #summary-header {
+        width: 100%;
+        text-align: center;
+        text-style: bold;
+        background: $boost;
+        color: $accent;
+        padding: 1;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        target: str,
+        scan_mode: str,
+        model_name: str,
+        scan_status: str,
+        elapsed_seconds: int,
+        estimated_cost: float,
+        vulnerabilities: list,
+        agent_responses: dict,
+    ):
+        super().__init__()
+        self.target = target
+        self.scan_mode = scan_mode
+        self.model_name = model_name
+        self.scan_status = scan_status
+        self.elapsed_seconds = elapsed_seconds
+        self.estimated_cost = estimated_cost
+        self.vulnerabilities = vulnerabilities
+        self.agent_responses = agent_responses
+
+    def compose(self) -> ComposeResult:
+        # Format elapsed time nicely
+        minutes, seconds = divmod(self.elapsed_seconds, 60)
+        time_str = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
+
+        content = Text()
+        content.append("📊 SCAN SUMMARY REPORT\n", style="bold underline yellow")
+        content.append("=" * 60 + "\n\n")
+
+        # Basic Stats
+        content.append("Overview\n", style="bold")
+        content.append("• Target: ")
+        content.append(f"{self.target}\n", style="cyan")
+        content.append("• Scan Mode: ")
+        content.append(f"{self.scan_mode}\n", style="cyan")
+        content.append("• Model: ")
+        content.append(f"{self.model_name}\n", style="cyan")
+        content.append("• Status: ")
+        content.append(f"{self.scan_status}\n", style="cyan")
+        content.append("• Duration: ")
+        content.append(f"{time_str}\n", style="cyan")
+        content.append("• Estimated Cost: ")
+        content.append(f"${self.estimated_cost:.5f}\n\n", style="yellow")
+
+        # Vulnerabilities section
+        content.append("Discovered Vulnerabilities\n", style="bold")
+        if not self.vulnerabilities:
+            content.append("No vulnerabilities found during the scan.\n\n", style="dim")
+        else:
+            for idx, vuln in enumerate(self.vulnerabilities, 1):
+                severity = vuln.get("severity", "info").upper()
+                severity_colors = {
+                    "CRITICAL": "red",
+                    "HIGH": "bright_red",
+                    "MEDIUM": "yellow",
+                    "LOW": "blue",
+                    "INFO": "cyan",
+                }
+                color = severity_colors.get(severity, "white")
+                title = vuln.get("title", "Unknown")
+                description = vuln.get("description", "")
+                cve = f" ({vuln['cve_id']})" if vuln.get("cve_id") else ""
+
+                content.append(f"{idx}. [{severity}]", style=f"bold {color}")
+                content.append(f" {title}{cve}\n", style="bold")
+                content.append(f"   {description}\n")
+                if vuln.get("poc"):
+                    content.append("   PoC: ", style="bold")
+                    content.append(f"{vuln['poc']}\n")
+                content.append("\n")
+
+        # Agent comments/summaries
+        content.append("AI Agent Insights\n", style="bold")
+        roles_order = ["reconnaissance", "exploitation", "post_exploitation"]
+        has_agents_content = False
+        for role in roles_order:
+            if role in self.agent_responses and self.agent_responses[role]:
+                has_agents_content = True
+                role_pretty = role.replace("_", " ").title()
+                content.append(f"🤖 {role_pretty} Agent Summary:\n", style="bold green")
+                indented_response = "\n".join("   " + line for line in self.agent_responses[role].split("\n"))
+                content.append(f"{indented_response}\n\n")
+        
+        if not has_agents_content:
+            content.append("No agent reports or summaries captured yet.\n\n", style="dim")
+
+        with Vertical():
+            yield Label("Strix Scan Summary", id="summary-header")
+            with VerticalScroll(id="summary-scroll"):
+                yield Static(content)
+            yield Button("Close [dim](ESC)[/dim]", id="summary-close-btn")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "summary-close-btn":
+            self.app.pop_screen()
+
+    def on_key(self, event) -> None:
         if event.key == "escape":
             self.app.pop_screen()
 
@@ -300,10 +471,16 @@ class ScanTUIApp(App):
     vulnerabilities = reactive([])
     elapsed = reactive(0)
     activity_log = reactive([])
+    estimated_cost = reactive(0.0)
+    sandbox_status = reactive("unknown")
+    goals = reactive({})
+    agent_responses = reactive({})
+    model_name = reactive("")
 
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("d", "show_detail", "Detail"),
+        ("s", "show_summary", "Summary"),
     ]
 
     def __init__(
@@ -330,6 +507,8 @@ class ScanTUIApp(App):
         self.timeout = timeout
         self.verbose = verbose
         self.current_vuln_idx = 0
+        self.agent_responses = {}
+        self.model_name = model or "default"
 
     def compose(self) -> ComposeResult:
         """Compose the layout with four panels."""
@@ -355,24 +534,38 @@ class ScanTUIApp(App):
                 yield Label("[bold]Events[/bold]", id="events-title")
                 yield AgentActivityPanel(id="agent-activity-panel")
 
+            # Button container at the bottom
+            with Horizontal(id="buttons-container"):
+                yield Button("Show Summary [dim](S)[/dim]", id="summary-button")
+                yield Button("Quit [dim](Q)[/dim]", id="quit-button")
+
     def on_mount(self) -> None:
         """Initialize the app and start background scan."""
-        # Initialize agent statuses
+        # Initialize agent statuses and goals
         for role in ["reconnaissance", "exploitation", "post_exploitation"]:
             self.agents[role] = {"status": "initialized", "iterations": 0}
+
+        self.goals = {
+            "bootstrap": "pending",
+            "reconnaissance": "pending",
+            "exploitation": "pending",
+            "post_exploitation": "pending",
+        }
 
         # Wire up reactive updates to widgets
         activity_log_panel = self.query_one("#agent-activity-panel", AgentActivityPanel)
         activity_log_panel.activity_log = self.activity_log
 
         agents_panel = self.query_one("#agents-panel", AgentsPanel)
-        agents_panel.agents = self.agents
-        agents_panel.current_agent = self.current_agent
+        agents_panel.goals = self.goals
 
         activity_panel = self.query_one("#activity-panel", ActivityPanel)
         activity_panel.target = self.target
         activity_panel.scan_mode = self.scan_mode
+        activity_panel.model_name = self.model_name
         activity_panel.current_status = self.scan_status
+        activity_panel.sandbox_status = self.sandbox_status
+        activity_panel.estimated_cost = self.estimated_cost
 
         vulns_panel = self.query_one("#vulnerabilities-panel", VulnerabilitiesPanel)
         vulns_panel.vulnerabilities = self.vulnerabilities
@@ -391,6 +584,22 @@ class ScanTUIApp(App):
         except Exception:
             pass
 
+    def watch_goals(self, goals: dict) -> None:
+        """Update goals panel when goals change."""
+        try:
+            panel = self.query_one("#agents-panel", AgentsPanel)
+            panel.goals = goals
+        except Exception:
+            pass
+
+    def watch_model_name(self, model_name: str) -> None:
+        """Update model name in activity panel."""
+        try:
+            panel = self.query_one("#activity-panel", ActivityPanel)
+            panel.model_name = model_name
+        except Exception:
+            pass
+
     def watch_current_agent(self, agent: str) -> None:
         """Update current agent highlight."""
         try:
@@ -404,6 +613,22 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.current_status = status
+        except Exception:
+            pass
+
+    def watch_sandbox_status(self, status: str) -> None:
+        """Update sandbox status in activity panel."""
+        try:
+            panel = self.query_one("#activity-panel", ActivityPanel)
+            panel.sandbox_status = status
+        except Exception:
+            pass
+
+    def watch_estimated_cost(self, cost: float) -> None:
+        """Update estimated cost in activity panel."""
+        try:
+            panel = self.query_one("#activity-panel", ActivityPanel)
+            panel.estimated_cost = cost
         except Exception:
             pass
 
@@ -494,6 +719,69 @@ class ScanTUIApp(App):
             logger.info("✅ Scan started")
             self.scan_status = "running"
             self.elapsed = 0
+            self.model_name = event.get("model", self.model_name)
+
+        elif event_type == "tool_started":
+            tool_name = event.get("tool_name", "unknown")
+            command = event.get("command", "")
+            role = event.get("role", "unknown")
+
+            log = list(self.activity_log)
+            msg = f"  🔧 [{role}] Tool Started: {tool_name}"
+            if command:
+                cmd_preview = command[:80] + "..." if len(command) > 80 else command
+                msg += f"\n     Command: {cmd_preview}"
+            log.append({
+                "level": "info",
+                "message": msg,
+            })
+            self.activity_log = log
+
+        elif event_type == "tool_output":
+            tool_name = event.get("tool_name", "unknown")
+            output = event.get("output", "")
+            role = event.get("role", "unknown")
+
+            log = list(self.activity_log)
+            msg = f"  📥 [{role}] Tool Output: {tool_name}"
+            if output:
+                lines = output.strip().split("\n")
+                if len(lines) > 5:
+                    lines = lines[:4] + [f"... ({len(lines) - 4} more lines) ..."]
+                out_preview = "\n     ".join(lines)
+                msg += f"\n     Result:\n     {out_preview}"
+            log.append({
+                "level": "info",
+                "message": msg,
+            })
+            self.activity_log = log
+
+        elif event_type == "goal_updated":
+            goal_id = event.get("goal_id", "")
+            status = event.get("status", "pending")
+            if goal_id:
+                goals = dict(self.goals)
+                goals[goal_id] = status
+                self.goals = goals
+
+        elif event_type == "sandbox_status":
+            status = event.get("status", "unknown")
+            self.sandbox_status = status
+
+            error = event.get("error")
+            log = list(self.activity_log)
+            msg = f"📦 Sandbox status: {status}"
+            if error:
+                msg += f" (Error: {error})"
+            log.append({
+                "level": "warning" if status in ("unreachable", "destroyed") else "info",
+                "message": msg,
+            })
+            self.activity_log = log
+
+        elif event_type == "cost_updated":
+            cumulative_cost = event.get("cumulative_cost", 0.0)
+            self.estimated_cost = cumulative_cost
 
         elif event_type == "scan_configured":
             # Log scan configuration
@@ -599,6 +887,12 @@ class ScanTUIApp(App):
             })
             self.activity_log = log
 
+            # Store in agent responses for the final summary page
+            if role:
+                responses = dict(self.agent_responses)
+                responses[role] = message
+                self.agent_responses = responses
+
         elif event_type == "agent_completed":
             role = event.get("role", "")
             iteration = event.get("iteration", 0)
@@ -655,14 +949,42 @@ class ScanTUIApp(App):
             vuln = self.vulnerabilities[self.current_vuln_idx]
             self.push_screen(VulnerabilityDetailModal(vuln))
 
+    def action_show_summary(self) -> None:
+        """Show summary modal."""
+        self.push_screen(ScanSummaryModal(
+            target=self.target,
+            scan_mode=self.scan_mode,
+            model_name=self.model_name,
+            scan_status=self.scan_status,
+            elapsed_seconds=self.elapsed,
+            estimated_cost=self.estimated_cost,
+            vulnerabilities=self.vulnerabilities,
+            agent_responses=self.agent_responses,
+        ))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button pressed events."""
+        if event.button.id == "summary-button":
+            self.action_show_summary()
+        elif event.button.id == "quit-button":
+            self.action_quit()
+
 
 @click.command()
-@click.option("--target", required=True, help="Target URL to scan")
 @click.option(
+    "-t",
+    "--target",
+    required=True,
+    type=str,
+    multiple=True,
+    help="Target URL to scan (first target will be scanned)",
+)
+@click.option(
+    "-m",
     "--scan-mode",
     type=click.Choice(["quick", "standard", "deep"]),
-    default="standard",
-    help="Scan intensity level",
+    default="deep",
+    help="Scan intensity level (default: deep)",
 )
 @click.option("--model", type=str, default=None, help="Override LLM model")
 @click.option(
@@ -682,6 +1004,12 @@ class ScanTUIApp(App):
     help="Custom instruction for the agent",
 )
 @click.option(
+    "--instruction-file",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help="Path to a file containing detailed custom instructions for the penetration test.",
+)
+@click.option(
     "--skills",
     type=str,
     default="",
@@ -698,25 +1026,67 @@ class ScanTUIApp(App):
     is_flag=True,
     help="Enable verbose output",
 )
+@click.option(
+    "-n",
+    "--non-interactive",
+    is_flag=True,
+    help="Run in non-interactive mode (ignored in TUI)",
+)
+@click.option(
+    "--scope-mode",
+    type=click.Choice(["auto", "diff", "full"]),
+    default="auto",
+    help="Scope mode for code targets (ignored in TUI)",
+)
+@click.option(
+    "--diff-base",
+    type=str,
+    default=None,
+    help="Target branch or commit to compare against (ignored in TUI)",
+)
+@click.option(
+    "--config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a custom config file (ignored in TUI)",
+)
+@click.version_option(version="0.1.0-pydantic")
 def main(
-    target: str,
+    target: tuple[str, ...],
     scan_mode: str,
     model: Optional[str],
     backend_url: str,
     mock_tools: bool,
     instruction: str,
+    instruction_file: Optional[str],
     skills: str,
     timeout: float,
     verbose: bool,
+    non_interactive: bool,
+    scope_mode: str,
+    diff_base: Optional[str],
+    config: Optional[str],
 ) -> None:
     """Launch Textual TUI client connected to backend service."""
+    if instruction and instruction_file:
+        raise click.UsageError("Cannot specify both --instruction and --instruction-file. Use one or the other.")
+
+    if instruction_file:
+        try:
+            with open(instruction_file, "r", encoding="utf-8") as f:
+                instruction = f.read().strip()
+        except Exception as e:
+            raise click.ClickException(f"Failed to read instruction file '{instruction_file}': {e}")
+
     # Setup logging
     log_file = setup_logging()
+
+    single_target = target[0] if target else ""
 
     logger.info("=" * 80)
     logger.info("🎨 Starting Strix TUI Client")
     logger.info(f"   Backend URL: {backend_url}")
-    logger.info(f"   Target: {target}")
+    logger.info(f"   Target: {single_target}")
     logger.info(f"   Scan Mode: {scan_mode}")
     logger.info(f"   Model: {model or 'default'}")
     logger.info(f"   Mock Tools: {mock_tools}")
@@ -727,7 +1097,7 @@ def main(
     logger.info("=" * 80)
 
     app = ScanTUIApp(
-        target=target,
+        target=single_target,
         scan_mode=scan_mode,
         backend_url=backend_url,
         model=model,

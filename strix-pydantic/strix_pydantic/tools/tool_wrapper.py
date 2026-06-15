@@ -6,7 +6,7 @@ import logging
 import uuid
 from typing import Any, Callable
 
-from pydantic_ai import FunctionToolset
+from pydantic_ai import FunctionToolset, RunContext
 
 from strix_pydantic.runtime.sandbox_client import SandboxClient
 
@@ -66,6 +66,82 @@ def build_tools_from_registry(
     return toolset
 
 
+def build_direct_tools_from_registry(tool_registry) -> FunctionToolset:
+    """
+    Build a pydantic-ai FunctionToolset for mock execution with event wrappers.
+
+    Args:
+        tool_registry: ToolRegistry instance with registered tools
+
+    Returns:
+        FunctionToolset with mock tools wrapped for event emission
+    """
+    logger.info("Building mock toolset from registry with event wrappers")
+
+    parent_tools = tool_registry.get_tools_for_context("parent")
+
+    tool_callables = []
+    for tool_name, tool_def in parent_tools.items():
+        wrapped = _create_direct_wrapper(tool_name, tool_def.callable)
+        tool_callables.append(wrapped)
+        logger.info(f"  ✅ Wrapped mock tool: {tool_name}")
+
+    return FunctionToolset(tools=tool_callables)
+
+
+def _create_direct_wrapper(
+    tool_name: str,
+    original_callable: Any,
+) -> Any:
+    """Create a wrapper for direct (mock) tools that injects RunContext and emits events."""
+
+    async def direct_wrapper(ctx: RunContext[Any], **kwargs) -> Any:
+        role = ctx.agent.name if hasattr(ctx, "agent") and ctx.agent else "unknown"
+
+        # Emit tool started
+        if ctx.deps.event_emitter:
+            cmd = f"{tool_name}(" + ", ".join(f"{k}={v}" for k, v in kwargs.items()) + ")"
+            await ctx.deps.event_emitter("tool_started", {
+                "tool_name": tool_name,
+                "command": cmd,
+                "role": role,
+            })
+
+        # Run original tool
+        result = await original_callable(**kwargs)
+
+        # Emit tool output
+        if ctx.deps.event_emitter:
+            output_str = json.dumps(result, default=str)
+            await ctx.deps.event_emitter("tool_output", {
+                "tool_name": tool_name,
+                "output": output_str,
+                "role": role,
+            })
+
+        return result
+
+    direct_wrapper.__name__ = original_callable.__name__
+    direct_wrapper.__doc__ = original_callable.__doc__
+
+    # Prepend RunContext to signature
+    sig = inspect.signature(original_callable)
+    params = list(sig.parameters.values())
+    ctx_param = inspect.Parameter(
+        name="ctx",
+        kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        annotation=RunContext[Any],
+    )
+    direct_wrapper.__signature__ = sig.replace(parameters=[ctx_param] + params)
+
+    # Prepend RunContext to annotations
+    annotations = getattr(original_callable, "__annotations__", {}).copy()
+    annotations["ctx"] = RunContext[Any]
+    direct_wrapper.__annotations__ = annotations
+
+    return direct_wrapper
+
+
 def _create_sandbox_wrapper(
     tool_name: str,
     sandbox_client: SandboxClient,
@@ -96,9 +172,20 @@ def _create_sandbox_wrapper(
             logger.debug(f"Failed to record tool event for {tool_name}: {e}")
 
     # Get docstring and annotations from original for pydantic-ai introspection
-    async def sandbox_wrapper(**kwargs) -> Any:
+    async def sandbox_wrapper(ctx: RunContext[Any], **kwargs) -> Any:
         """Execute tool through sandbox."""
         logger.info(f"🔧 [SANDBOX] Dispatching {tool_name} kwargs={kwargs}")
+
+        role = ctx.agent.name if hasattr(ctx, "agent") and ctx.agent else agent_id
+
+        # Emit tool started
+        if ctx.deps.event_emitter:
+            cmd = kwargs.get("command") or f"{tool_name}(" + ", ".join(f"{k}={v}" for k, v in kwargs.items()) + ")"
+            await ctx.deps.event_emitter("tool_started", {
+                "tool_name": tool_name,
+                "command": cmd,
+                "role": role,
+            })
 
         # Unique call ID prevents parallel tool calls from cancelling each other.
         # The sandbox cancels previous tasks per agent_id, so each call needs a unique id.
@@ -121,6 +208,24 @@ def _create_sandbox_wrapper(
                     "result": result.result,
                 }
             )
+
+            # Emit tool output
+            if ctx.deps.event_emitter:
+                output_str = ""
+                if isinstance(result.result, dict):
+                    if "content" in result.result:
+                        output_str = str(result.result["content"])
+                    else:
+                        output_str = json.dumps(result.result, default=str)
+                else:
+                    output_str = str(result.result)
+
+                await ctx.deps.event_emitter("tool_output", {
+                    "tool_name": tool_name,
+                    "output": output_str,
+                    "role": role,
+                })
+
             return result.result
 
         error_msg = f"Tool error: {result.error_code} - {result.error_message}"
@@ -140,16 +245,30 @@ def _create_sandbox_wrapper(
             }
         )
 
+        # Emit tool output error
+        if ctx.deps.event_emitter:
+            await ctx.deps.event_emitter("tool_output", {
+                "tool_name": tool_name,
+                "output": f"ERROR: {result.error_code} - {result.error_message}",
+                "role": role,
+            })
+
         # Return error info so agent can see what went wrong
         return {"error": result.error_code, "message": result.error_message}
 
-    # Copy metadata from original callable for pydantic-ai introspection
-    sandbox_wrapper.__name__ = original_callable.__name__
-    sandbox_wrapper.__doc__ = original_callable.__doc__
-    if hasattr(original_callable, "__annotations__"):
-        sandbox_wrapper.__annotations__ = original_callable.__annotations__
+    # Prepend RunContext to signature
+    sig = inspect.signature(original_callable)
+    params = list(sig.parameters.values())
+    ctx_param = inspect.Parameter(
+        name="ctx",
+        kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        annotation=RunContext[Any],
+    )
+    sandbox_wrapper.__signature__ = sig.replace(parameters=[ctx_param] + params)
 
-    # Preserve signature for pydantic-ai inspection
-    sandbox_wrapper.__signature__ = inspect.signature(original_callable)
+    # Prepend RunContext to annotations
+    annotations = getattr(original_callable, "__annotations__", {}).copy()
+    annotations["ctx"] = RunContext[Any]
+    sandbox_wrapper.__annotations__ = annotations
 
     return sandbox_wrapper

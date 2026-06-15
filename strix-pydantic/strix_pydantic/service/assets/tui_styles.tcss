@@ -189,3 +189,15 @@ Panel {
 Static {
     color: $text;
 }
+
+#buttons-container {
+    height: 3;
+    align: center middle;
+    background: $boost;
+    border-top: solid $primary;
+}
+
+#buttons-container Button {
+    margin: 0 2;
+    width: 25;
+}
