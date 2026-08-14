@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from pydantic_graph import End, GraphBuilder
@@ -281,13 +283,24 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         req_limit = request_limits.get(state.scan_mode, 500)
         usage_limits = UsageLimits(request_limit=req_limit)
 
-        try:
-            result = await agent.run(
-                user_prompt=prompt,
-                message_history=history,
-                deps=deps,
-                usage_limits=usage_limits,
+        _span_ctx = nullcontext()
+        if os.getenv("LOGFIRE_TOKEN"):
+            import logfire
+            _span_ctx = logfire.span(
+                "agent_phase",
+                role=role,
+                scan_id=state.run_id,
+                scan_mode=state.scan_mode,
             )
+
+        try:
+            with _span_ctx:
+                result = await agent.run(
+                    user_prompt=prompt,
+                    message_history=history,
+                    deps=deps,
+                    usage_limits=usage_limits,
+                )
         except Exception as e:
             state.agent_statuses[role] = "failed"
             logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)

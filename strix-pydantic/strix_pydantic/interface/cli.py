@@ -14,6 +14,7 @@ from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
 from strix_pydantic.interface.tui import StrixTUIApp, OperationStatus
+from strix_pydantic.observability import configure_logfire
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
 from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
 from strix_pydantic.tools.tool_registry import ToolRegistry
@@ -194,6 +195,8 @@ def scan(
     Example:
         strix --target https://example.com --scan-mode standard --skills reconnaissance
     """
+    configure_logfire()
+
     if instruction and instruction_file:
         raise click.UsageError("Cannot specify both --instruction and --instruction-file. Use one or the other.")
 
