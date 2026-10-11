@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic_graph import End, GraphBuilder
 
-from .types import RunConfig, StrixDeps, StrixRunState
+from .types import StrixDeps, StrixRunState
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ def build_orchestrator_graph() -> Any:
         # Initialize sandbox client for tool execution
         if deps.sandbox_client:
             await deps.sandbox_client.__aenter__()
-            logger.info(f"✅ [BOOTSTRAP] Initialized sandbox client")
+            logger.info("✅ [BOOTSTRAP] Initialized sandbox client")
 
         try:
             return await _run_orchestration(state, deps)
@@ -174,7 +174,7 @@ def build_orchestrator_graph() -> Any:
             # Cleanup sandbox client
             if deps.sandbox_client:
                 await deps.sandbox_client.__aexit__(None, None, None)
-                logger.info(f"✅ [CLEANUP] Closed sandbox client")
+                logger.info("✅ [CLEANUP] Closed sandbox client")
 
     # Connect start node to orchestrator step
     g.add(g.edge_from(g.start_node).to(orchestrate))
@@ -204,16 +204,16 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     # Validate target
     if not state.target:
         state.error = "Target URL is required"
-        logger.error(f"❌ [ABORT] Target is empty")
+        logger.error("❌ [ABORT] Target is empty")
         if deps.event_emitter:
             await deps.event_emitter("scan_failed", {
                 "error": "Target URL is required",
                 "duration_seconds": time.time() - start_time,
             })
-        return End(f"Aborted: Target URL is required")
+        return End("Aborted: Target URL is required")
 
     # Initialize message history for all agent roles
-    for role in deps.agents.keys():
+    for role in deps.agents:
         if role not in state.message_history:
             state.message_history[role] = []
         state.agent_statuses[role] = "initialized"
@@ -303,7 +303,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 )
         except Exception as e:
             state.agent_statuses[role] = "failed"
-            logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
+            logger.exception(f"❌ [AGENT] {role} error")
             state.error = f"Agent execution error: {e}"
             if deps.event_emitter:
                 await deps.event_emitter("goal_updated", {
@@ -347,7 +347,6 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
             in_tokens = usage.input_tokens or 0
             out_tokens = usage.output_tokens or 0
             cache_read = usage.cache_read_tokens or 0
-            cache_write = usage.cache_write_tokens or 0
 
             # Simple rate card per 1,000,000 tokens
             model = deps.run_config.model_name.lower()
@@ -472,7 +471,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 break
 
     # ========== FINALIZE ==========
-    logger.info(f"📊 [FINALIZE] Generating summary")
+    logger.info("📊 [FINALIZE] Generating summary")
 
     # Build final summary
     summary_lines = [
@@ -490,7 +489,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
 
     state.final_summary = "\n".join(summary_lines)
 
-    logger.info(f"✅ [FINALIZE] Run complete")
+    logger.info("✅ [FINALIZE] Run complete")
 
     # Emit scan completed event
     duration = time.time() - start_time

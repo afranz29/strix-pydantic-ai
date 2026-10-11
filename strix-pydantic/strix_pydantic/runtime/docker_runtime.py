@@ -7,7 +7,6 @@ import os
 import secrets
 import socket
 import time
-import uuid
 from typing import TypedDict
 from urllib.parse import urlparse
 

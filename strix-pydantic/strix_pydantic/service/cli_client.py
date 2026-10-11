@@ -3,13 +3,11 @@
 import asyncio
 import json
 import sys
-from typing import Optional
 
 import click
 import httpx
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 
 
 class ScanClient:
@@ -35,7 +33,7 @@ class ScanClient:
         self,
         target: str,
         scan_mode: str = "standard",
-        model: Optional[str] = None,
+        model: str | None = None,
         mock_tools: bool = False,
         confirm: bool = False,
         instruction: str = "",
@@ -96,7 +94,7 @@ class ScanClient:
                         try:
                             event = json.loads(line)
                             await self._handle_event(event)
-                        except json.JSONDecodeError as e:
+                        except json.JSONDecodeError:
                             self.console.print(f"[dim]Invalid JSON: {line[:50]}[/dim]")
                             continue
 
@@ -111,7 +109,7 @@ class ScanClient:
         event_type = event.get("type")
 
         if event_type == "scan_started":
-            self.console.print(f"🚀 Scan started")
+            self.console.print("🚀 Scan started")
             self.console.print(f"   Target: {event.get('target')}")
             self.console.print(f"   Mode: {event.get('scan_mode')}\n")
 
@@ -168,7 +166,7 @@ class ScanClient:
 
             self.console.print("\n" + "=" * 60)
             self.console.print(
-                f"[green]✅ Scan completed successfully[/green]"
+                "[green]✅ Scan completed successfully[/green]"
             )
             self.console.print(f"   Duration: {duration:.1f}s")
             self.console.print(f"   Vulnerabilities: {vuln_count}")
@@ -180,7 +178,7 @@ class ScanClient:
             duration = event.get("duration_seconds", 0)
 
             self.console.print("\n" + "=" * 60)
-            self.console.print(f"[red]❌ Scan failed[/red]")
+            self.console.print("[red]❌ Scan failed[/red]")
             self.console.print(f"   Error: {error}")
             self.console.print(f"   Duration: {duration:.1f}s")
             self.console.print("=" * 60)
@@ -225,7 +223,7 @@ class ScanClient:
 def scan(
     target: str,
     scan_mode: str,
-    model: Optional[str],
+    model: str | None,
     mock_tools: bool,
     confirm: bool,
     instruction: str,

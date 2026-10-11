@@ -3,7 +3,6 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 REQUIRED_CONTENT_DIRS = {"tools", "skills", "agents"}
 
 
-def resolve_content_dir() -> Optional[Path]:
+def resolve_content_dir() -> Path | None:
     """
     Resolve strix content directory with priority:
     1. STRIX_CONTENT_DIR env var (if valid)
@@ -67,7 +66,7 @@ def validate_content_dir(path: Path) -> bool:
     return True
 
 
-def get_content_path(subdir: str) -> Optional[Path]:
+def get_content_path(subdir: str) -> Path | None:
     """
     Get path to a content subdirectory (e.g., "skills", "tools", "agents").
 

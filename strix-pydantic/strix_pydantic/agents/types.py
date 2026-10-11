@@ -1,7 +1,8 @@
 """Shared types for graph orchestration and agent execution."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, ModelMessage
@@ -85,15 +86,15 @@ class StrixDeps:
     sandbox_client: Any = None  # SandboxClient instance, initialized in orchestrator
 
     # Called between roles: (completed_role, next_role, summary_snippet, vuln_count) -> bool
-    confirm_proceed: Optional[Callable[[str, str, str, int], bool]] = None
+    confirm_proceed: Callable[[str, str, str, int], bool] | None = None
 
     # Optional TUI callbacks for real-time dashboard updates
-    ui_update_agent_status: Optional[Callable[[str, str, int], None]] = None  # (role, status, iterations)
-    ui_add_output: Optional[Callable[[str, str], None]] = None  # (message, style)
-    ui_show_vulnerability: Optional[Callable[[str, str, str], None]] = None  # (title, severity, desc)
+    ui_update_agent_status: Callable[[str, str, int], None] | None = None  # (role, status, iterations)
+    ui_add_output: Callable[[str, str], None] | None = None  # (message, style)
+    ui_show_vulnerability: Callable[[str, str, str], None] | None = None  # (title, severity, desc)
 
     # Optional event emitter for backend service integration
-    event_emitter: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None  # (event_type, payload)
+    event_emitter: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None  # (event_type, payload)
 
     # Optional context for tracking
     parent_context: dict[str, Any] = field(default_factory=dict)

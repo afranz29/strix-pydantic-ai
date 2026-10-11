@@ -1,9 +1,10 @@
 """Factory for building skill-aware agent capabilities from strix/skills content."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from pydantic_ai import AbstractToolset, FilteredToolset, FunctionToolset, RunContext
 
@@ -21,7 +22,7 @@ class SkillBuild:
 class SkillCapabilityFactory:
     """Factory for building skill capabilities from strix/skills content."""
 
-    def __init__(self, strix_content_dir: Optional[Path] = None):
+    def __init__(self, strix_content_dir: Path | None = None):
         """
         Initialize the skill factory.
 
@@ -32,7 +33,7 @@ class SkillCapabilityFactory:
         self.skills_dir = self.strix_content_dir / "skills" if self.strix_content_dir else None
         logger.info(f"SkillCapabilityFactory using content dir: {self.skills_dir}")
 
-    def _resolve_strix_content_dir(self) -> Optional[Path]:
+    def _resolve_strix_content_dir(self) -> Path | None:
         """
         Resolve strix content directory with priority:
         1. STRIX_CONTENT_DIR env var
@@ -169,7 +170,7 @@ class SkillCapabilityFactory:
 
         return filter_func
 
-    def _load_skill_content(self, skill_id: str) -> Optional[str]:
+    def _load_skill_content(self, skill_id: str) -> str | None:
         """
         Load markdown content from a skill file.
 

@@ -1,11 +1,9 @@
 """Runner that starts backend service and launches TUI client together."""
 
 import asyncio
-import signal
 import subprocess
 import sys
 import time
-from typing import Optional
 
 import click
 import httpx
@@ -142,18 +140,18 @@ def run_backend(
 def main(
     target: tuple[str, ...],
     scan_mode: str,
-    model: Optional[str],
+    model: str | None,
     backend_url: str,
     mock_tools: bool,
     instruction: str,
-    instruction_file: Optional[str],
+    instruction_file: str | None,
     skills: str,
     timeout: float,
     verbose: bool,
     non_interactive: bool,
     scope_mode: str,
-    diff_base: Optional[str],
-    config: Optional[str],
+    diff_base: str | None,
+    config: str | None,
 ) -> None:
     """Start backend service and launch Textual TUI client."""
     import os
@@ -232,7 +230,7 @@ def main(
             if verbose:
                 tui_args.append("--verbose")
 
-            tui_process = subprocess.run(tui_args)
+            tui_process = subprocess.run(tui_args, check=False)
             if tui_process.returncode != 0:
                 overall_exit_code = tui_process.returncode
 

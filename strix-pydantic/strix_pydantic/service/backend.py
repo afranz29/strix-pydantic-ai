@@ -5,9 +5,9 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from typing import Any
 
 import fastapi
 from fastapi.responses import StreamingResponse
@@ -18,28 +18,27 @@ from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
 from strix_pydantic.observability import configure_logfire
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
-from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
-from strix_pydantic.tools.tool_registry import ToolRegistry
 from strix_pydantic.runtime.sandbox_client import SandboxClient
 from strix_pydantic.service.events import (
     AgentCompletedEvent,
     AgentMessageEvent,
+    AgentStartedEvent,
     AgentThinkingEvent,
     AgentTokenUsageEvent,
-    AgentStartedEvent,
+    CostUpdatedEvent,
+    GoalUpdatedEvent,
+    LogMessageEvent,
+    SandboxStatusEvent,
     ScanCompletedEvent,
     ScanConfiguredEvent,
     ScanFailedEvent,
     ScanStartedEvent,
     ToolExecutedEvent,
-    VulnerabilityFoundEvent,
-    LogMessageEvent,
-    ToolStartedEvent,
     ToolOutputEvent,
-    GoalUpdatedEvent,
-    SandboxStatusEvent,
-    CostUpdatedEvent,
+    ToolStartedEvent,
+    VulnerabilityFoundEvent,
 )
+from strix_pydantic.tools.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +117,11 @@ class ScanRequest(BaseModel):
 
     target: str
     scan_mode: str = "standard"
-    model: Optional[str] = None
+    model: str | None = None
     mock_tools: bool = False
     confirm: bool = False
     instruction: str = ""
-    sandbox_url: Optional[str] = None
+    sandbox_url: str | None = None
     skills: str = ""
     timeout: float = 120.0
     verbose: bool = False
@@ -143,9 +142,9 @@ class ScanSession:
         self.scan_id = scan_id
         self.request = request
         self.start_time = time.time()
-        self.state: Optional[StrixRunState] = None
+        self.state: StrixRunState | None = None
         self.status = "initialized"  # initialized, running, completed, failed
-        self.error: Optional[str] = None
+        self.error: str | None = None
 
     def to_dict(self) -> dict:
         """Convert session to dict for API responses."""
@@ -168,6 +167,7 @@ configure_logfire()
 app = fastapi.FastAPI(title="Strix Backend Service")
 
 import os as _os
+
 if _os.getenv("LOGFIRE_TOKEN"):
     import logfire as _logfire
     _logfire.instrument_fastapi(app)
@@ -301,7 +301,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
         # Create event emitter
         async def emit_event(event_type: str, payload: dict[str, Any]) -> None:
             """Emit event to queue."""
-            timestamp = datetime.now(timezone.utc).replace(tzinfo=None)
+            timestamp = datetime.now(UTC).replace(tzinfo=None)
             payload["scan_id"] = scan_id
             payload["timestamp"] = timestamp
             payload["type"] = event_type
@@ -408,10 +408,10 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
 
         try:
             # Register strix tools
-            from strix_pydantic.interface.cli import _register_strix_tools, _build_agents
+            from strix_pydantic.interface.cli import _build_agents, _register_strix_tools
 
             if request.mock_tools:
-                logger.info(f"📦 [TOOLS] Using mock tools (no Docker)")
+                logger.info("📦 [TOOLS] Using mock tools (no Docker)")
             else:
                 logger.info(f"📦 [TOOLS] Registering real tools to {sandbox_url}")
                 _register_strix_tools(tool_registry)
@@ -424,7 +424,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                 skill_list = [s.strip() for s in request.skills.split(",") if s.strip()]
                 logger.info(f"🎯 [SKILLS] Active skills: {', '.join(skill_list)}")
             else:
-                logger.info(f"🎯 [SKILLS] No specific skills requested")
+                logger.info("🎯 [SKILLS] No specific skills requested")
 
             # Emit scan configured event
             await emit_event("scan_configured", {
@@ -504,7 +504,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
             })
 
         except Exception as e:
-            logger.error(f"❌ [BACKGROUND] Scan {scan_id} orchestrator error: {e}", exc_info=True)
+            logger.exception(f"❌ [BACKGROUND] Scan {scan_id} orchestrator error")
             session.status = "failed"
             session.error = str(e)
 
@@ -533,7 +533,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
                     logger.warning(f"Failed to cleanup sandbox: {e}")
 
     except Exception as e:
-        logger.error(f"Scan {scan_id} background error: {e}", exc_info=True)
+        logger.exception(f"Scan {scan_id} background error")
         session.status = "failed"
         session.error = str(e)
 

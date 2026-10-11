@@ -8,19 +8,19 @@ version = "0.1.0"
 description = "Strix non-interactive orchestrator using Pydantic AI and Pydantic Graph"
 requires-python = ">=3.11"
 dependencies = [
-    "docker>=7.1.0",
-    "pydantic-ai>=1.0",
-    "pydantic-graph>=1.0",
-    "pydantic>=2.0",
+    "docker>=7.2.0",
+    "pydantic-ai[bedrock]>=2.0,<3",
+    "pydantic-graph>=2.0,<3",
+    "pydantic>=2.14.1",
     "httpx>=0.27.0",
-    "click>=8.1.0",
-    "python-dotenv>=1.0.0",
+    "click>=8.5.0",
+    "python-dotenv>=1.2.4",
     "defusedxml>=0.7.1",
-    "textual>=1.0.0",
-    "rich>=13.0.0",
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
-    "logfire>=4.33.0",
+    "textual>=8.2.8",
+    "rich>=15.0.0",
+    "fastapi>=0.143.0",
+    "uvicorn[standard]>=0.54.0",
+    "logfire>=5.1.1",
 ]
 
 [project.scripts]
@@ -32,18 +32,18 @@ strix-tui-standalone = "strix_pydantic.service.runner:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-cov>=4.0",
-    "ruff>=0.1.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.0",
 ]
 ui = [
-    "textual>=1.0.0",
-    "rich>=13.0.0",
+    "textual>=8.2.8",
+    "rich>=15.0.0",
 ]
 service = [
-    "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
+    "fastapi>=0.143.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -57,3 +57,6 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["BLE001", "S110", "SIM115"]

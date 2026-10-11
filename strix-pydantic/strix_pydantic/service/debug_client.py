@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from typing import Optional
 
 import click
 import httpx
@@ -15,14 +14,14 @@ async def run_debug_client(
     scan_mode: str = "standard",
     instruction: str = "",
     mock_tools: bool = False,
-    model: Optional[str] = None,
+    model: str | None = None,
 ) -> None:
     """Connect to backend and stream events."""
     print(f"🔗 Connecting to backend at {backend_url}")
 
     async with httpx.AsyncClient() as client:
         # 1. Start scan
-        print(f"\n📤 Starting scan...")
+        print("\n📤 Starting scan...")
         print(f"   Target: {target}")
         print(f"   Scan mode: {scan_mode}")
         if instruction:
@@ -167,7 +166,7 @@ async def run_debug_client(
                         continue
 
         except httpx.ConnectError:
-            print(f"❌ Connection lost to backend")
+            print("❌ Connection lost to backend")
             sys.exit(1)
         except Exception as e:
             print(f"❌ Error streaming events: {e}")
@@ -211,7 +210,7 @@ def main(
     instruction: str,
     scan_mode: str,
     backend_url: str,
-    model: Optional[str],
+    model: str | None,
     mock_tools: bool,
 ) -> None:
     """Debug client for backend validation."""

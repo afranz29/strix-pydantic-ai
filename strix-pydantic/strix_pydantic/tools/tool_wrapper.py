@@ -4,7 +4,8 @@ import inspect
 import json
 import logging
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from pydantic_ai import FunctionToolset, RunContext
 
