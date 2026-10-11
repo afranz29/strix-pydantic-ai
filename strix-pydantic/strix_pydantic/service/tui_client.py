@@ -1,11 +1,10 @@
 """Textual TUI client for Strix backend service."""
 
-import asyncio
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import ClassVar
 
 import click
 import httpx
@@ -13,14 +12,15 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
+from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
-from textual.reactive import reactive
 
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_file: Optional[Path] = None) -> Path:
+def setup_logging(log_file: Path | None = None) -> Path:
     """Configure logging to file (console logging is disabled to avoid corrupting the TUI)."""
     if log_file is None:
         logs_dir = Path(__file__).parent.parent.parent / "logs"
@@ -432,7 +432,7 @@ class ScanSummaryModal(ModalScreen):
         roles_order = ["reconnaissance", "exploitation", "post_exploitation"]
         has_agents_content = False
         for role in roles_order:
-            if role in self.agent_responses and self.agent_responses[role]:
+            if self.agent_responses.get(role):
                 has_agents_content = True
                 role_pretty = role.replace("_", " ").title()
                 content.append(f"🤖 {role_pretty} Agent Summary:\n", style="bold green")
@@ -477,7 +477,7 @@ class ScanTUIApp(App):
     agent_responses = reactive({})
     model_name = reactive("")
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
         ("q", "quit", "Quit"),
         ("d", "show_detail", "Detail"),
         ("s", "show_summary", "Summary"),
@@ -488,7 +488,7 @@ class ScanTUIApp(App):
         target: str,
         scan_mode: str,
         backend_url: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         mock_tools: bool = False,
         instruction: str = "",
         skills: str = "",
@@ -581,7 +581,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#agents-panel", AgentsPanel)
             panel.agents = agents
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_goals(self, goals: dict) -> None:
@@ -589,7 +589,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#agents-panel", AgentsPanel)
             panel.goals = goals
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_model_name(self, model_name: str) -> None:
@@ -597,7 +597,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.model_name = model_name
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_current_agent(self, agent: str) -> None:
@@ -605,7 +605,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#agents-panel", AgentsPanel)
             panel.current_agent = agent
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_scan_status(self, status: str) -> None:
@@ -613,7 +613,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.current_status = status
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_sandbox_status(self, status: str) -> None:
@@ -621,7 +621,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.sandbox_status = status
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_estimated_cost(self, cost: float) -> None:
@@ -629,7 +629,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.estimated_cost = cost
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_vulnerabilities(self, vulns: list) -> None:
@@ -637,7 +637,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#vulnerabilities-panel", VulnerabilitiesPanel)
             panel.vulnerabilities = vulns
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_activity_log(self, log: list) -> None:
@@ -645,7 +645,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#agent-activity-panel", AgentActivityPanel)
             panel.activity_log = log
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_elapsed(self, seconds: int) -> None:
@@ -653,7 +653,7 @@ class ScanTUIApp(App):
         try:
             panel = self.query_one("#activity-panel", ActivityPanel)
             panel.elapsed_seconds = seconds
-        except Exception:
+        except NoMatches:
             pass
 
     def update_elapsed_time(self) -> None:
@@ -1054,18 +1054,18 @@ class ScanTUIApp(App):
 def main(
     target: tuple[str, ...],
     scan_mode: str,
-    model: Optional[str],
+    model: str | None,
     backend_url: str,
     mock_tools: bool,
     instruction: str,
-    instruction_file: Optional[str],
+    instruction_file: str | None,
     skills: str,
     timeout: float,
     verbose: bool,
     non_interactive: bool,
     scope_mode: str,
-    diff_base: Optional[str],
-    config: Optional[str],
+    diff_base: str | None,
+    config: str | None,
 ) -> None:
     """Launch Textual TUI client connected to backend service."""
     if instruction and instruction_file:
@@ -1079,7 +1079,7 @@ def main(
             raise click.ClickException(f"Failed to read instruction file '{instruction_file}': {e}")
 
     # Setup logging
-    log_file = setup_logging()
+    setup_logging()
 
     single_target = target[0] if target else ""
 

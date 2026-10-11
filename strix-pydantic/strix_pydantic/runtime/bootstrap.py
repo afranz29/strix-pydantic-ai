@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 
 async def initialize_sandbox(
     run_id: str,
-    sandbox_url: Optional[str],
+    sandbox_url: str | None,
 ) -> tuple[str, str, Any | None, dict[str, Any] | None]:
     """Resolve sandbox connection details, creating a Docker sandbox when needed."""
     if sandbox_url:

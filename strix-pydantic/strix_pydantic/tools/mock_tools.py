@@ -1,6 +1,5 @@
 """Mock tools for testing orchestrator tool dispatch without Docker backend."""
 
-import json
 import logging
 from typing import Any
 

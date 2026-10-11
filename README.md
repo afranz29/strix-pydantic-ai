@@ -12,7 +12,7 @@ Strix is actively being developed with two implementations:
 
 | Implementation | Status | Path | Description |
 |---|---|---|---|
-| **Strix Pydantic** | In Development | `strix-pydantic/` | Python implementation using Pydantic AI v1.102.0 and Pydantic Graph. Core orchestration complete; tool integration in progress. |
+| **Strix Pydantic** | In Development | `strix-pydantic/` | Python implementation using Pydantic AI v2.x. Core orchestration complete; tool integration in progress. |
 | **Strix Go** | Maintenance | `strix-go/` | Go port for high-concurrency and binary distribution. Currently in stabilization phase. |
 | **Strix Legacy** | Legacy | `strix/` | Original Python prototype. Maintained for reference and skill library source. |
 
@@ -21,15 +21,17 @@ Strix is actively being developed with two implementations:
 ## ✨ Key Features (Pydantic Implementation)
 
 ### Implemented ✅
-- **Graph-Based Orchestration** — Unified multi-step orchestrator using Pydantic Graph, coordinating 3 agent roles (reconnaissance, exploitation, post_exploitation).
+- **Orchestration** — A single async orchestrator function runs the full scan workflow, coordinating 3 agent roles (reconnaissance, exploitation, post_exploitation).
 - **Multi-LLM Provider Support** — String-based model selection with automatic fallback:
   - **Anthropic** (Primary): `claude-haiku-4-5` (when `ANTHROPIC_API_KEY` is set)
   - **OpenAI**: `gpt-4o-mini` (when `OPENAI_API_KEY` is set)
   - **Google Gemini**: `gemini-3.5-flash` (fallback when Google API key is set)
+  - **OpenRouter**, **Bedrock**, and **Azure** are also supported with an explicit `--model` prefix (e.g. `openrouter:z-ai/glm-5.3-flash`)
 - **Skill-Based Agent Instructions** — Dynamically loads capabilities from `strix/skills/` markdown files.
 - **Type-Safe Definitions** — Structured agent outputs using Pydantic models (vulnerabilities, notes, findings).
 - **CLI Interface** — Non-interactive scanner with `--target`, `--scan-mode`, `--model` override, and testing modes.
 - **Docker Sandbox Support** — Automatic Docker sandbox lifecycle with configurable timeout and cleanup.
+- **Logfire Observability** — Optional tracing via `LOGFIRE_TOKEN` or a project linked with `uvx logfire projects use`.
 
 ### In Progress 🚧
 - **Tool Execution Dispatch** — Sandbox client interface ready; endpoint routing and actual execution integration pending.
@@ -135,15 +137,15 @@ Model name patterns are recognized:
 ## 🏗️ Architecture & Implementation Details
 
 ### Pydantic Implementation (Primary Development)
-- **Technology Stack**: Pydantic AI v1.102.0 + Pydantic Graph v1.0+ (stable APIs)
-- **Core Orchestrator**: Unified `StepContext`-based graph with 3 agent roles
-- **State Management**: Immutable `StrixRunState` flowing through graph steps
+- **Technology Stack**: Pydantic AI v2.x
+- **Core Orchestrator**: A single `run_orchestration()` async function with 3 agent roles
+- **State Management**: Mutable `StrixRunState` shared across agent phases
 - **Tool Integration**: Docker sandbox client with context-aware tool filtering (in progress)
 - **Skills System**: Markdown-based capability loading from `strix/skills/`
 
 **Key Files**:
 - `strix-pydantic/strix_pydantic/interface/cli.py` — CLI entry point with all scan options
-- `strix-pydantic/strix_pydantic/agents/pydantic_orchestrator.py` — Graph orchestration logic
+- `strix-pydantic/strix_pydantic/agents/pydantic_orchestrator.py` — Orchestration logic
 - `strix-pydantic/strix_pydantic/config/model_config.py` — Provider detection and model resolution
 
 **Implementation Status**: See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for detailed progress on core framework, tool integration, and remaining work.

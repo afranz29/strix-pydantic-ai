@@ -1,6 +1,6 @@
 """Output formatters for enhanced TUI display."""
 
-from typing import Any, Optional
+from typing import Any
 
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -35,7 +35,7 @@ def format_vulnerability_panel(vuln: Vulnerability) -> Panel:
     if vuln.parameter:
         lines.append(f"[dim]Parameter: {vuln.parameter}[/dim]")
     if vuln.poc:
-        lines.append(f"[dim]PoC available[/dim]")
+        lines.append("[dim]PoC available[/dim]")
 
     content = Text.from_markup("".join(lines))
 
@@ -77,7 +77,7 @@ def format_scan_summary(
     duration_seconds: float,
     agent_iterations: int,
     tools_executed: int,
-    error: Optional[str] = None,
+    error: str | None = None,
 ) -> Table:
     """
     Format scan summary as a Rich Table.

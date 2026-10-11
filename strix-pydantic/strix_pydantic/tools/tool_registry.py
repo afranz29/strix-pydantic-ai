@@ -1,10 +1,10 @@
 """Tool registry with context-aware filtering for sandbox vs parent execution."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
-from pydantic_ai import AbstractToolset, FilteredToolset, FunctionToolset, RunContext
-
+from pydantic_ai import FilteredToolset, FunctionToolset
 
 ToolContext = Literal["sandbox", "parent"]
 
@@ -17,7 +17,7 @@ class ToolDefinition:
     description: str
     callable: Callable[..., Any]
     contexts: set[ToolContext]  # {"sandbox"}, {"parent"}, or {"sandbox", "parent"}
-    parameters: Optional[dict[str, Any]] = None
+    parameters: dict[str, Any] | None = None
 
 
 class ToolRegistry:
@@ -35,7 +35,7 @@ class ToolRegistry:
         description: str,
         callable_obj: Callable[..., Any],
         contexts: set[ToolContext],
-        parameters: Optional[dict[str, Any]] = None,
+        parameters: dict[str, Any] | None = None,
     ) -> None:
         """
         Register a tool with context availability.
@@ -118,7 +118,7 @@ class ToolRegistry:
     def build_filtered_toolset(
         self,
         context: ToolContext,
-        filter_func: Optional[Callable[[str], bool]] = None,
+        filter_func: Callable[[str], bool] | None = None,
     ) -> FilteredToolset:
         """
         Build a FilteredToolset for a context with optional additional filtering.
@@ -147,9 +147,7 @@ class ToolRegistry:
                 return False
             if context not in self._tools[tool_name].contexts:
                 return False
-            if filter_func and not filter_func(tool_name):
-                return False
-            return True
+            return not (filter_func and not filter_func(tool_name))
 
         return FilteredToolset(
             wrapped=base,
@@ -160,7 +158,7 @@ class ToolRegistry:
         self,
         tool_name: str,
         context: ToolContext,
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """
         Validate tool is available before execution.
 

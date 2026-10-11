@@ -137,8 +137,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
         )
         
         # Run orchestrator
-        graph = build_orchestrator_graph()
-        await _run_graph_async(graph, state, deps)
+        await run_orchestration(state, deps)
         
         # Success case handled by orchestrator emit_event
 ```
@@ -147,10 +146,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
 
 ```python
 # At the top of backend.py
-from strix_pydantic.agents.pydantic_orchestrator import (
-    build_orchestrator_graph,
-    _run_graph_async,
-)
+from strix_pydantic.agents.pydantic_orchestrator import run_orchestration
 from strix_pydantic.config.model_config import (
     normalize_model_spec,
     resolve_model_config,

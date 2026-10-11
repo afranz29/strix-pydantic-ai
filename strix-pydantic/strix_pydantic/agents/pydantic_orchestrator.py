@@ -1,15 +1,14 @@
-"""Pydantic Graph orchestrator for non-interactive scans."""
+"""Orchestrator for non-interactive scans."""
 
 import json
 import logging
-import os
 import time
 from contextlib import nullcontext
 from typing import Any
 
-from pydantic_graph import End, GraphBuilder
+from strix_pydantic.observability import logfire_enabled
 
-from .types import RunConfig, StrixDeps, StrixRunState
+from .types import StrixDeps, StrixRunState
 
 logger = logging.getLogger(__name__)
 
@@ -137,53 +136,28 @@ def _extract_thinking(result: Any) -> str:
     return ""
 
 
-def build_orchestrator_graph() -> Any:
+async def run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
     """
-    Build the orchestration graph using GraphBuilder.
-
-    Single unified orchestrator step handles full workflow loop internally.
+    Run a full scan: sandbox lifecycle, agent turns, tool dispatch and finalization.
 
     Returns:
-        Configured Graph ready for execution with graph.run(state=..., deps=...)
+        Final summary, or the abort reason
     """
-    g = GraphBuilder(
-        state_type=StrixRunState,
-        deps_type=StrixDeps,
-        output_type=str,
-    )
+    # Initialize sandbox client for tool execution
+    if deps.sandbox_client:
+        await deps.sandbox_client.__aenter__()
+        logger.info("✅ [BOOTSTRAP] Initialized sandbox client")
 
-    @g.step
-    async def orchestrate(ctx) -> End[str]:
-        """
-        Execute full scan orchestration workflow.
-
-        Handles bootstrap, agent turns, tool dispatch, and finalization
-        in a single unified step.
-        """
-        state = ctx.state
-        deps = ctx.deps
-
-        # Initialize sandbox client for tool execution
+    try:
+        return await _run_orchestration(state, deps)
+    finally:
+        # Cleanup sandbox client
         if deps.sandbox_client:
-            await deps.sandbox_client.__aenter__()
-            logger.info(f"✅ [BOOTSTRAP] Initialized sandbox client")
-
-        try:
-            return await _run_orchestration(state, deps)
-        finally:
-            # Cleanup sandbox client
-            if deps.sandbox_client:
-                await deps.sandbox_client.__aexit__(None, None, None)
-                logger.info(f"✅ [CLEANUP] Closed sandbox client")
-
-    # Connect start node to orchestrator step
-    g.add(g.edge_from(g.start_node).to(orchestrate))
-
-    # Build and return graph
-    return g.build(validate_graph_structure=False)
+            await deps.sandbox_client.__aexit__(None, None, None)
+            logger.info("✅ [CLEANUP] Closed sandbox client")
 
 
-async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
+async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
     """Run the main orchestration workflow with proper error handling."""
     start_time = time.time()
 
@@ -204,16 +178,16 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     # Validate target
     if not state.target:
         state.error = "Target URL is required"
-        logger.error(f"❌ [ABORT] Target is empty")
+        logger.error("❌ [ABORT] Target is empty")
         if deps.event_emitter:
             await deps.event_emitter("scan_failed", {
                 "error": "Target URL is required",
                 "duration_seconds": time.time() - start_time,
             })
-        return End(f"Aborted: Target URL is required")
+        return "Aborted: Target URL is required"
 
     # Initialize message history for all agent roles
-    for role in deps.agents.keys():
+    for role in deps.agents:
         if role not in state.message_history:
             state.message_history[role] = []
         state.agent_statuses[role] = "initialized"
@@ -225,7 +199,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     if not roles:
         state.error = "No agents configured"
         logger.error("❌ [ABORT] No agents")
-        return End("Aborted: No agents configured")
+        return "Aborted: No agents configured"
 
     prior_outputs: dict[str, str] = {}
 
@@ -284,7 +258,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         usage_limits = UsageLimits(request_limit=req_limit)
 
         _span_ctx = nullcontext()
-        if os.getenv("LOGFIRE_TOKEN"):
+        if logfire_enabled():
             import logfire
             _span_ctx = logfire.span(
                 "agent_phase",
@@ -303,14 +277,14 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 )
         except Exception as e:
             state.agent_statuses[role] = "failed"
-            logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
+            logger.exception(f"❌ [AGENT] {role} error")
             state.error = f"Agent execution error: {e}"
             if deps.event_emitter:
                 await deps.event_emitter("goal_updated", {
                     "goal_id": role,
                     "status": "failed",
                 })
-            return End(f"Aborted: {state.error}")
+            return f"Aborted: {state.error}"
 
         _log_agent_result(role, result)
 
@@ -347,7 +321,6 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
             in_tokens = usage.input_tokens or 0
             out_tokens = usage.output_tokens or 0
             cache_read = usage.cache_read_tokens or 0
-            cache_write = usage.cache_write_tokens or 0
 
             # Simple rate card per 1,000,000 tokens
             model = deps.run_config.model_name.lower()
@@ -472,7 +445,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 break
 
     # ========== FINALIZE ==========
-    logger.info(f"📊 [FINALIZE] Generating summary")
+    logger.info("📊 [FINALIZE] Generating summary")
 
     # Build final summary
     summary_lines = [
@@ -490,7 +463,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
 
     state.final_summary = "\n".join(summary_lines)
 
-    logger.info(f"✅ [FINALIZE] Run complete")
+    logger.info("✅ [FINALIZE] Run complete")
 
     # Emit scan completed event
     duration = time.time() - start_time
@@ -501,4 +474,4 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
             "iterations": state.iteration,
         })
 
-    return End("\n".join(summary_lines))
+    return "\n".join(summary_lines)

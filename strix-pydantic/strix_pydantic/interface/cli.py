@@ -6,14 +6,14 @@ import signal
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import click
 
-from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
+from strix_pydantic.agents.pydantic_orchestrator import run_orchestration
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
-from strix_pydantic.interface.tui import StrixTUIApp, OperationStatus
+from strix_pydantic.interface.tui import StrixTUIApp
 from strix_pydantic.observability import configure_logfire
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
 from strix_pydantic.skills.skill_capability_factory import SkillCapabilityFactory
@@ -29,7 +29,7 @@ class _StrixFilter(logging.Filter):
         return record.name.startswith("strix_pydantic")
 
 
-def setup_logging(log_file: Optional[Path] = None, verbose: bool = False) -> Path:
+def setup_logging(log_file: Path | None = None, verbose: bool = False) -> Path:
     """
     Setup logging with file output and live console output.
 
@@ -174,20 +174,20 @@ def scan(
     target: tuple[str, ...],
     scan_mode: str,
     skills: str,
-    model: Optional[str],
+    model: str | None,
     sandbox_url: str,
     timeout: float,
-    log_file: Optional[str],
+    log_file: str | None,
     verbose: bool,
     mock_tools: bool,
     instruction: str,
-    instruction_file: Optional[str],
+    instruction_file: str | None,
     confirm: bool,
     ui: bool,
     non_interactive: bool,
     scope_mode: str,
-    diff_base: Optional[str],
-    config: Optional[str],
+    diff_base: str | None,
+    config: str | None,
 ) -> None:
     """
     Run a non-interactive Strix security scan.
@@ -229,7 +229,7 @@ def scan(
             tui_app.start()
 
         # Print startup lines
-        click.echo(f"📋 Strix Non-Interactive Scanner")
+        click.echo("📋 Strix Non-Interactive Scanner")
         click.echo(f"   Log file: {log_path}")
 
         # Resolve model config
@@ -336,7 +336,7 @@ def scan(
 
         except Exception as e:
             click.echo(f"❌ Failed to initialize agents: {e}", err=True)
-            logger.error(f"Agent initialization error: {e}", exc_info=True)
+            logger.exception("Agent initialization error")
             if runtime is not None:
                 runtime.cleanup()
             tui_app.stop()
@@ -348,7 +348,7 @@ def scan(
 
         # Register signal handler for emergency cleanup before starting the scan
         if runtime is not None:
-            def _signal_cleanup(signum, frame):
+            def _signal_cleanup(signum, frame, runtime=runtime):
                 runtime.cleanup()
                 raise KeyboardInterrupt
 
@@ -366,7 +366,7 @@ def scan(
             logger.info("Scan interrupted by user")
         except Exception as e:
             click.echo(f"❌ Scan failed: {e}", err=True)
-            logger.error(f"Orchestrator error: {e}", exc_info=True)
+            logger.exception("Orchestrator error")
             state.error = state.error or f"Scan failed: {e}"
             target_exit_code = 1
         finally:
@@ -384,6 +384,9 @@ def scan(
             sys.exit(130)
         if target_exit_code:
             overall_exit_code = target_exit_code
+
+    if overall_exit_code:
+        sys.exit(overall_exit_code)
 
 
 def _make_confirm_callback():
@@ -420,7 +423,7 @@ def _register_strix_tools(tool_registry) -> None:
         no_enter: bool = False,
     ) -> dict[str, Any]:
         """Execute a shell command in the sandbox terminal. Returns output, exit code, and status."""
-        pass  # Replaced by sandbox dispatch wrapper
+        # Replaced by sandbox dispatch wrapper
 
     tool_registry.register_tool(
         name="terminal_execute",
@@ -437,9 +440,9 @@ def _build_agents(
     model_spec: str,
     skill_list: list[str],
     run_config: RunConfig,
-    tool_registry: Optional[Any] = None,
-    sandbox_client: Optional[Any] = None,
-    run_state: Optional[StrixRunState] = None,
+    tool_registry: Any | None = None,
+    sandbox_client: Any | None = None,
+    run_state: StrixRunState | None = None,
 ) -> dict[str, Any]:
     """
     Build Agent instances for each role with sandbox tool dispatch.
@@ -456,6 +459,7 @@ def _build_agents(
         Dict of role -> Agent[StrixDeps, Any]
     """
     from pydantic_ai import Agent
+
     from strix_pydantic.agents.types import AgentOutput
     from strix_pydantic.tools.tool_wrapper import build_tools_from_registry
 
@@ -583,7 +587,7 @@ def _run_orchestrator(
     verbose: bool = False,
 ) -> None:
     """
-    Run the Pydantic Graph orchestrator.
+    Run the orchestrator.
 
     Args:
         state: Run state
@@ -593,46 +597,15 @@ def _run_orchestrator(
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Build graph
-    graph = build_orchestrator_graph()
-
-    # Run graph (async wrapper)
-    asyncio.run(_run_graph_async(graph, state, deps))
-
-
-async def _run_graph_async(
-    graph: Any,
-    state: StrixRunState,
-    deps: StrixDeps,
-) -> None:
-    """
-    Run the graph asynchronously.
-
-    Args:
-        graph: Pydantic Graph instance
-        state: Run state
-        deps: Dependencies
-    """
     try:
-        # Run graph with state and deps
-        # The exact API depends on pydantic-graph implementation
-        result = graph.run(state=state, deps=deps)
-
-        # For async compatibility, handle both sync and async returns
-        if hasattr(result, "__await__"):
-            await result
-        else:
-            # Sync result, already done
-            pass
-
-        logger.info(f"Graph completed: {state.final_summary}")
-
-    except Exception as e:
-        logger.error(f"Graph execution error: {e}", exc_info=True)
+        asyncio.run(run_orchestration(state, deps))
+        logger.info(f"Run completed: {state.final_summary}")
+    except Exception:
+        logger.exception("Orchestration error")
         raise
 
 
-def _print_final_summary(state: StrixRunState, tui_app: Optional[StrixTUIApp] = None) -> None:
+def _print_final_summary(state: StrixRunState, tui_app: StrixTUIApp | None = None) -> None:
     """
     Print final summary in Go-style format and TUI display.
 
@@ -641,12 +614,12 @@ def _print_final_summary(state: StrixRunState, tui_app: Optional[StrixTUIApp] = 
         tui_app: Optional TUI app to display summary
     """
     click.echo("\n" + "=" * 60)
-    click.echo(f"🤖 [AGENT STATUSES]")
+    click.echo("🤖 [AGENT STATUSES]")
     for role, status in state.agent_statuses.items():
         click.echo(f"   {role}: {status}")
 
     if state.agent_responses:
-        click.echo(f"\n💬 [AGENT RESPONSES]")
+        click.echo("\n💬 [AGENT RESPONSES]")
         for role, response in state.agent_responses.items():
             click.echo(f"\n--- {role} ---")
             click.echo(response)
@@ -704,7 +677,7 @@ def _print_final_summary(state: StrixRunState, tui_app: Optional[StrixTUIApp] = 
     if state.error:
         click.echo(f"❌ Run Failed: {state.error}")
     else:
-        click.echo(f"✅ Scan completed successfully")
+        click.echo("✅ Scan completed successfully")
         click.echo(f"   Run ID: {state.run_id}")
         click.echo(f"   Total iterations: {state.iteration}")
 

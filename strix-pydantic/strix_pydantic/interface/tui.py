@@ -2,17 +2,15 @@
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import ClassVar
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.reactive import reactive
-from textual.widgets import Static, TextArea
+from textual.widgets import Static
 
 
 class OperationStatus(str, Enum):
@@ -110,8 +108,8 @@ class ActivityPanel(Static):
 class OutputPanel(Static):
     """Right panel showing results and output."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.output_lines = []
         self.max_lines = 100
 
@@ -165,13 +163,13 @@ class StrixDashboard(App):
     }
     """
 
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("q", "quit", "Quit")]
 
     def __init__(self):
         super().__init__()
-        self.agents_panel: Optional[AgentsPanel] = None
-        self.activity_panel: Optional[ActivityPanel] = None
-        self.output_panel: Optional[OutputPanel] = None
+        self.agents_panel: AgentsPanel | None = None
+        self.activity_panel: ActivityPanel | None = None
+        self.output_panel: OutputPanel | None = None
 
     def compose(self) -> ComposeResult:
         """Create the three-panel layout."""
@@ -193,7 +191,7 @@ class StrixDashboard(App):
             if status == "running":
                 self.agents_panel.current_agent = agent_name
 
-    def update_activity(self, status: str, tools: Optional[list[str]] = None) -> None:
+    def update_activity(self, status: str, tools: list[str] | None = None) -> None:
         """Update current activity."""
         if self.activity_panel:
             self.activity_panel.current_status = status
@@ -216,9 +214,9 @@ class StrixProgressApp:
 
     def __init__(self):
         """Initialize progress app."""
-        self.app: Optional[StrixDashboard] = None
+        self.app: StrixDashboard | None = None
         self._running = False
-        self._app_task: Optional[asyncio.Task] = None
+        self._app_task: asyncio.Task | None = None
 
     def start(self) -> None:
         """Start the TUI application."""
@@ -253,7 +251,7 @@ class StrixProgressApp:
         if self.app and self.app.is_mounted:
             self.app.update_agent_status(agent_name, status, iterations)
 
-    def update_activity(self, status: str, tools: Optional[list[str]] = None) -> None:
+    def update_activity(self, status: str, tools: list[str] | None = None) -> None:
         """Update current activity."""
         if self.app and self.app.is_mounted:
             self.app.update_activity(status, tools)
@@ -280,7 +278,7 @@ class StrixTUIApp:
     def __init__(self, use_ui: bool = True):
         """Initialize TUI app."""
         self.use_ui = use_ui
-        self._app: Optional[StrixProgressApp] = None
+        self._app: StrixProgressApp | None = None
 
     def start(self) -> None:
         """Start the TUI if enabled."""
@@ -335,7 +333,7 @@ class StrixTUIApp:
         if self._app:
             self._app.update_agent_status(agent_name, status, iterations)
 
-    def update_activity(self, status: str, tools: Optional[list[str]] = None) -> None:
+    def update_activity(self, status: str, tools: list[str] | None = None) -> None:
         """Update current activity."""
         if self._app:
             self._app.update_activity(status, tools)

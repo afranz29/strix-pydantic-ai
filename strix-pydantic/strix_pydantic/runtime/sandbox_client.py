@@ -1,11 +1,10 @@
 """Docker sandbox client for tool execution with timeout and error handling."""
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
-
 
 ToolErrorCode = Literal[
     "auth_error",
@@ -24,7 +23,7 @@ class ToolError(BaseModel):
     code: ToolErrorCode
     message: str
     retriable: bool = False
-    details: Optional[dict[str, Any]] = None
+    details: dict[str, Any] | None = None
 
 
 class ToolExecutionRequest(BaseModel):
@@ -48,8 +47,8 @@ class SandboxToolResult:
 
     ok: bool
     result: Any | None
-    error_code: Optional[str]
-    error_message: Optional[str]
+    error_code: str | None
+    error_message: str | None
     retriable: bool
 
 
@@ -79,7 +78,7 @@ class SandboxClient:
         self.connect_timeout = connect_timeout
         self.execute_timeout = execute_timeout
         self.orchestrator_step_timeout = orchestrator_step_timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self):
         """Async context manager entry."""

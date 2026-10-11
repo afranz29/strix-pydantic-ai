@@ -3,4 +3,4 @@
 from strix_pydantic.service.backend import app
 from strix_pydantic.service.cli_client import ScanClient
 
-__all__ = ["app", "ScanClient"]
+__all__ = ["ScanClient", "app"]

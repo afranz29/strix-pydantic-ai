@@ -1,7 +1,8 @@
-import pytest
-from unittest.mock import MagicMock, patch
-from strix_pydantic.interface.cli import _build_agents
+from unittest.mock import patch
+
 from strix_pydantic.agents.types import RunConfig
+from strix_pydantic.interface.cli import _build_agents
+
 
 def test_build_agents_injects_scan_mode_skill():
     model_spec = "openai:gpt-4o-mini"
@@ -16,7 +17,7 @@ def test_build_agents_injects_scan_mode_skill():
     with patch("strix_pydantic.interface.cli.SkillCapabilityFactory") as mock_factory_cls:
         mock_factory = mock_factory_cls.return_value
         # Mock Agent to avoid real initialization and API key checks
-        with patch("pydantic_ai.Agent") as mock_agent_cls:
+        with patch("pydantic_ai.Agent"):
             _build_agents(
                 model_spec=model_spec,
                 skill_list=skill_list,
@@ -25,7 +26,7 @@ def test_build_agents_injects_scan_mode_skill():
             
             # Check that build_for_role was called with "scan_modes/quick"
             for call in mock_factory.build_for_role.call_args_list:
-                args, kwargs = call
+                args, _ = call
                 passed_skills = args[0]
                 assert "scan_modes/quick" in passed_skills
                 assert "reconnaissance" in passed_skills

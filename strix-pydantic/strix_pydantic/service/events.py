@@ -2,7 +2,7 @@
 """Event schema for backend service event streaming."""
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -86,9 +86,9 @@ class VulnerabilityFoundEvent(ScanEvent):
     title: str
     severity: str
     description: str
-    cve_id: Optional[str] = None
-    parameter: Optional[str] = None
-    poc: Optional[str] = None
+    cve_id: str | None = None
+    parameter: str | None = None
+    poc: str | None = None
 
 
 class AgentThinkingEvent(ScanEvent):
@@ -118,9 +118,9 @@ class ToolExecutedEvent(ScanEvent):
     type: Literal["tool_executed"]
     tool_name: str
     status: Literal["started", "completed", "failed"]
-    duration_ms: Optional[float] = None
-    exit_code: Optional[int] = None
-    error: Optional[str] = None
+    duration_ms: float | None = None
+    exit_code: int | None = None
+    error: str | None = None
 
 
 class LogMessageEvent(ScanEvent):
@@ -179,8 +179,8 @@ class SandboxStatusEvent(ScanEvent):
 
     type: Literal["sandbox_status"]
     status: Literal["provisioning", "ready", "unreachable", "destroyed"]
-    sandbox_url: Optional[str] = None
-    error: Optional[str] = None
+    sandbox_url: str | None = None
+    error: str | None = None
 
 
 class CostUpdatedEvent(ScanEvent):
