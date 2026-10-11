@@ -2,12 +2,13 @@
 
 import json
 import logging
-import os
 import time
 from contextlib import nullcontext
 from typing import Any
 
 from pydantic_graph import End, GraphBuilder
+
+from strix_pydantic.observability import logfire_enabled
 
 from .types import StrixDeps, StrixRunState
 
@@ -284,7 +285,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
         usage_limits = UsageLimits(request_limit=req_limit)
 
         _span_ctx = nullcontext()
-        if os.getenv("LOGFIRE_TOKEN"):
+        if logfire_enabled():
             import logfire
             _span_ctx = logfire.span(
                 "agent_phase",

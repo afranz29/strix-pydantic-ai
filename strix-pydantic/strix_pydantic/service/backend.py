@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
-from strix_pydantic.observability import configure_logfire
+from strix_pydantic.observability import configure_logfire, logfire_enabled
 from strix_pydantic.runtime.bootstrap import initialize_sandbox
 from strix_pydantic.runtime.sandbox_client import SandboxClient
 from strix_pydantic.service.events import (
@@ -166,9 +166,8 @@ configure_logfire()
 
 app = fastapi.FastAPI(title="Strix Backend Service")
 
-import os as _os
 
-if _os.getenv("LOGFIRE_TOKEN"):
+if logfire_enabled():
     import logfire as _logfire
     _logfire.instrument_fastapi(app)
 

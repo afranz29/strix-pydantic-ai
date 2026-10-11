@@ -108,8 +108,8 @@ class ActivityPanel(Static):
 class OutputPanel(Static):
     """Right panel showing results and output."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.output_lines = []
         self.max_lines = 100
 

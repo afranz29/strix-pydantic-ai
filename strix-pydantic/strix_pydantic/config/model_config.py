@@ -77,11 +77,12 @@ def normalize_model_spec(model_spec: str) -> str:
             "google-cloud",
             "bedrock",
             "azure",
+            "openrouter",
         ]:
             raise ValueError(
                 f"Unknown provider prefix '{provider}'. "
                 "Supported: anthropic, openai, gemini, google, google-gla, "
-                "googleai, google-cloud, bedrock, azure"
+                "googleai, google-cloud, bedrock, azure, openrouter"
             )
 
         if not model:
