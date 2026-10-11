@@ -13,7 +13,7 @@ import fastapi
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
+from strix_pydantic.agents.pydantic_orchestrator import run_orchestration
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
 from strix_pydantic.observability import configure_logfire, logfire_enabled
@@ -473,14 +473,7 @@ async def _run_scan_background(scan_id: str, request: ScanRequest) -> None:
 
             # Run orchestrator
             logger.info(f"🤖 [BACKGROUND] Starting orchestrator for scan {scan_id}")
-            graph = build_orchestrator_graph()
-            result = graph.run(state=state, deps=deps)
-
-            # Handle both sync and async returns
-            if hasattr(result, "__await__"):
-                await result
-            else:
-                pass  # Sync result, already done
+            await run_orchestration(state, deps)
 
             session.state = state
             session.status = "completed"

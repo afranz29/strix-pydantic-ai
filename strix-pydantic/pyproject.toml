@@ -5,12 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "strix-pydantic"
 version = "0.1.0"
-description = "Strix non-interactive orchestrator using Pydantic AI and Pydantic Graph"
+description = "Strix non-interactive orchestrator using Pydantic AI"
 requires-python = ">=3.11"
 dependencies = [
     "docker>=7.2.0",
     "pydantic-ai[bedrock]>=2.0,<3",
-    "pydantic-graph>=2.0,<3",
     "pydantic>=2.14.1",
     "httpx>=0.27.0",
     "click>=8.5.0",

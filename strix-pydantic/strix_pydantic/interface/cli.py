@@ -10,7 +10,7 @@ from typing import Any
 
 import click
 
-from strix_pydantic.agents.pydantic_orchestrator import build_orchestrator_graph
+from strix_pydantic.agents.pydantic_orchestrator import run_orchestration
 from strix_pydantic.agents.types import RunConfig, StrixDeps, StrixRunState
 from strix_pydantic.config.model_config import normalize_model_spec, resolve_model_config
 from strix_pydantic.interface.tui import StrixTUIApp
@@ -587,7 +587,7 @@ def _run_orchestrator(
     verbose: bool = False,
 ) -> None:
     """
-    Run the Pydantic Graph orchestrator.
+    Run the orchestrator.
 
     Args:
         state: Run state
@@ -597,42 +597,11 @@ def _run_orchestrator(
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Build graph
-    graph = build_orchestrator_graph()
-
-    # Run graph (async wrapper)
-    asyncio.run(_run_graph_async(graph, state, deps))
-
-
-async def _run_graph_async(
-    graph: Any,
-    state: StrixRunState,
-    deps: StrixDeps,
-) -> None:
-    """
-    Run the graph asynchronously.
-
-    Args:
-        graph: Pydantic Graph instance
-        state: Run state
-        deps: Dependencies
-    """
     try:
-        # Run graph with state and deps
-        # The exact API depends on pydantic-graph implementation
-        result = graph.run(state=state, deps=deps)
-
-        # For async compatibility, handle both sync and async returns
-        if hasattr(result, "__await__"):
-            await result
-        else:
-            # Sync result, already done
-            pass
-
-        logger.info(f"Graph completed: {state.final_summary}")
-
+        asyncio.run(run_orchestration(state, deps))
+        logger.info(f"Run completed: {state.final_summary}")
     except Exception:
-        logger.exception("Graph execution error")
+        logger.exception("Orchestration error")
         raise
 
 

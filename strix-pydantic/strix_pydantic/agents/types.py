@@ -1,4 +1,4 @@
-"""Shared types for graph orchestration and agent execution."""
+"""Shared types for orchestration and agent execution."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -37,7 +37,7 @@ class RunConfig:
 
 @dataclass
 class StrixRunState:
-    """Mutable graph state flowing through all nodes."""
+    """Mutable run state shared across agent phases."""
 
     # Run identity
     run_id: str
@@ -74,10 +74,9 @@ class StrixRunState:
 
 @dataclass
 class StrixDeps:
-    """Read-only dependencies injected at graph.run() time."""
+    """Read-only dependencies injected at run_orchestration() time."""
 
     # Do not embed non-serializable objects (Agent instances, asyncio.Event)
-    # pydantic-graph owns state serialization; complex objects go in closure context
 
     sandbox_url: str  # e.g., "http://127.0.0.1:8000"
     tool_registry: Any  # ToolRegistry instance

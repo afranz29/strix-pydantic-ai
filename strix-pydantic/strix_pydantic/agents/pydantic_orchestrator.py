@@ -1,12 +1,10 @@
-"""Pydantic Graph orchestrator for non-interactive scans."""
+"""Orchestrator for non-interactive scans."""
 
 import json
 import logging
 import time
 from contextlib import nullcontext
 from typing import Any
-
-from pydantic_graph import End, GraphBuilder
 
 from strix_pydantic.observability import logfire_enabled
 
@@ -138,53 +136,28 @@ def _extract_thinking(result: Any) -> str:
     return ""
 
 
-def build_orchestrator_graph() -> Any:
+async def run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
     """
-    Build the orchestration graph using GraphBuilder.
-
-    Single unified orchestrator step handles full workflow loop internally.
+    Run a full scan: sandbox lifecycle, agent turns, tool dispatch and finalization.
 
     Returns:
-        Configured Graph ready for execution with graph.run(state=..., deps=...)
+        Final summary, or the abort reason
     """
-    g = GraphBuilder(
-        state_type=StrixRunState,
-        deps_type=StrixDeps,
-        output_type=str,
-    )
+    # Initialize sandbox client for tool execution
+    if deps.sandbox_client:
+        await deps.sandbox_client.__aenter__()
+        logger.info("✅ [BOOTSTRAP] Initialized sandbox client")
 
-    @g.step
-    async def orchestrate(ctx) -> End[str]:
-        """
-        Execute full scan orchestration workflow.
-
-        Handles bootstrap, agent turns, tool dispatch, and finalization
-        in a single unified step.
-        """
-        state = ctx.state
-        deps = ctx.deps
-
-        # Initialize sandbox client for tool execution
+    try:
+        return await _run_orchestration(state, deps)
+    finally:
+        # Cleanup sandbox client
         if deps.sandbox_client:
-            await deps.sandbox_client.__aenter__()
-            logger.info("✅ [BOOTSTRAP] Initialized sandbox client")
-
-        try:
-            return await _run_orchestration(state, deps)
-        finally:
-            # Cleanup sandbox client
-            if deps.sandbox_client:
-                await deps.sandbox_client.__aexit__(None, None, None)
-                logger.info("✅ [CLEANUP] Closed sandbox client")
-
-    # Connect start node to orchestrator step
-    g.add(g.edge_from(g.start_node).to(orchestrate))
-
-    # Build and return graph
-    return g.build(validate_graph_structure=False)
+            await deps.sandbox_client.__aexit__(None, None, None)
+            logger.info("✅ [CLEANUP] Closed sandbox client")
 
 
-async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
+async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
     """Run the main orchestration workflow with proper error handling."""
     start_time = time.time()
 
@@ -211,7 +184,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                 "error": "Target URL is required",
                 "duration_seconds": time.time() - start_time,
             })
-        return End("Aborted: Target URL is required")
+        return "Aborted: Target URL is required"
 
     # Initialize message history for all agent roles
     for role in deps.agents:
@@ -226,7 +199,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
     if not roles:
         state.error = "No agents configured"
         logger.error("❌ [ABORT] No agents")
-        return End("Aborted: No agents configured")
+        return "Aborted: No agents configured"
 
     prior_outputs: dict[str, str] = {}
 
@@ -311,7 +284,7 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
                     "goal_id": role,
                     "status": "failed",
                 })
-            return End(f"Aborted: {state.error}")
+            return f"Aborted: {state.error}"
 
         _log_agent_result(role, result)
 
@@ -501,4 +474,4 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
             "iterations": state.iteration,
         })
 
-    return End("\n".join(summary_lines))
+    return "\n".join(summary_lines)
