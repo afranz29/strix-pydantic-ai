@@ -1,276 +1,196 @@
-<p align="center">
-  <a href="https://strix.ai/">
-    <img src="https://github.com/usestrix/.github/raw/main/imgs/cover.png" alt="Strix Banner" width="100%">
-  </a>
-</p>
-
-<div align="center">
-
 # Strix
 
-### Open-source AI hackers to find and fix your app’s vulnerabilities.
+### Autonomous Multi-Agent Security Framework
 
-<br/>
-
-
-<a href="https://docs.strix.ai"><img src="https://img.shields.io/badge/Docs-docs.strix.ai-2b9246?style=for-the-badge&logo=gitbook&logoColor=white" alt="Docs"></a>
-<a href="https://strix.ai"><img src="https://img.shields.io/badge/Website-strix.ai-f0f0f0?style=for-the-badge&logoColor=000000" alt="Website"></a>
-[![](https://dcbadge.limes.pink/api/server/strix-ai)](https://discord.gg/strix-ai)
-
-<a href="https://deepwiki.com/usestrix/strix"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-<a href="https://github.com/usestrix/strix"><img src="https://img.shields.io/github/stars/usestrix/strix?style=flat-square" alt="GitHub Stars"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-3b82f6?style=flat-square" alt="License"></a>
-<a href="https://pypi.org/project/strix-agent/"><img src="https://img.shields.io/pypi/v/strix-agent?style=flat-square" alt="PyPI Version"></a>
-
-
-<a href="https://discord.gg/strix-ai"><img src="https://github.com/usestrix/.github/raw/main/imgs/Discord.png" height="40" alt="Join Discord"></a>
-<a href="https://x.com/strix_ai"><img src="https://github.com/usestrix/.github/raw/main/imgs/X.png" height="40" alt="Follow on X"></a>
-
-
-<a href="https://trendshift.io/repositories/15362" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15362" alt="usestrix/strix | Trendshift" width="250" height="55"/></a>
-
-</div>
-
-
-> [!TIP]
-> **New!** Strix integrates seamlessly with GitHub Actions and CI/CD pipelines. Automatically scan for vulnerabilities on every pull request and block insecure code before it reaches production - [Get started with no setup required](https://app.strix.ai).
+Strix is an AI-powered security pentesting framework that coordinates multiple agents to discover, validate, and exploit vulnerabilities in an isolated sandbox.
 
 ---
 
+## 🚀 Current Status
 
-## Strix Overview
+Strix is actively being developed with two implementations:
 
-Strix are autonomous AI agents that act just like real hackers - they run your code dynamically, find vulnerabilities, and validate them through actual proof-of-concepts. Built for developers and security teams who need fast, accurate security testing without the overhead of manual pentesting or the false positives of static analysis tools.
+| Implementation | Status | Path | Description |
+|---|---|---|---|
+| **Strix Pydantic** | In Development | `strix-pydantic/` | Python implementation using Pydantic AI v1.102.0 and Pydantic Graph. Core orchestration complete; tool integration in progress. |
+| **Strix Go** | Maintenance | `strix-go/` | Go port for high-concurrency and binary distribution. Currently in stabilization phase. |
+| **Strix Legacy** | Legacy | `strix/` | Original Python prototype. Maintained for reference and skill library source. |
 
-**Key Capabilities:**
+---
 
-- **Full hacker toolkit** out of the box
-- **Teams of agents** that collaborate and scale
-- **Real validation** with PoCs, not false positives
-- **Developer‑first** CLI with actionable reports
-- **Auto‑fix & reporting** to accelerate remediation
+## ✨ Key Features (Pydantic Implementation)
 
+### Implemented ✅
+- **Graph-Based Orchestration** — Unified multi-step orchestrator using Pydantic Graph, coordinating 3 agent roles (reconnaissance, exploitation, post_exploitation).
+- **Multi-LLM Provider Support** — String-based model selection with automatic fallback:
+  - **Anthropic** (Primary): `claude-haiku-4-5` (when `ANTHROPIC_API_KEY` is set)
+  - **OpenAI**: `gpt-4o-mini` (when `OPENAI_API_KEY` is set)
+  - **Google Gemini**: `gemini-3.5-flash` (fallback when Google API key is set)
+- **Skill-Based Agent Instructions** — Dynamically loads capabilities from `strix/skills/` markdown files.
+- **Type-Safe Definitions** — Structured agent outputs using Pydantic models (vulnerabilities, notes, findings).
+- **CLI Interface** — Non-interactive scanner with `--target`, `--scan-mode`, `--model` override, and testing modes.
+- **Docker Sandbox Support** — Automatic Docker sandbox lifecycle with configurable timeout and cleanup.
 
-<br>
+### In Progress 🚧
+- **Tool Execution Dispatch** — Sandbox client interface ready; endpoint routing and actual execution integration pending.
+- **Message History Continuity** — Framework support present; multi-turn agent reasoning optimization in progress.
 
+---
 
-<div align="center">
-  <a href="https://strix.ai">
-    <img src=".github/screenshot.png" alt="Strix Demo" width="1000" style="border-radius: 16px;">
-  </a>
-</div>
-
-
-## Use Cases
-
-- **Application Security Testing** - Detect and validate critical vulnerabilities in your applications
-- **Rapid Penetration Testing** - Get penetration tests done in hours, not weeks, with compliance reports
-- **Bug Bounty Automation** - Automate bug bounty research and generate PoCs for faster reporting
-- **CI/CD Integration** - Run tests in CI/CD to block vulnerabilities before reaching production
-
-## 🚀 Quick Start
+## 🚀 Quick Start (Strix Pydantic)
 
 **Prerequisites:**
-- Docker (running)
-- An LLM API key from any [supported provider](https://docs.strix.ai/llm-providers/overview) (OpenAI, Anthropic, Google, etc.)
+- Python 3.11+
+- [uv](https://github.com/astral-sh/uv) (recommended for dependency management)
+- Docker (for sandboxed tool execution)
+- LLM API Key (Anthropic, OpenAI, or Google)
 
-### Installation & First Scan
+### Setup & Run
 
 ```bash
-# Install Strix
-curl -sSL https://strix.ai/install | bash
+# Clone the repository
+git clone https://github.com/usestrix/strix.git
+cd strix
 
-# Configure your AI provider
-export STRIX_LLM="openai/gpt-5.4"
-export LLM_API_KEY="your-api-key"
+# Install dependencies
+cd strix-pydantic
+uv sync
+cd ..
 
-# Run your first security assessment
-strix --target ./app-directory
+# Configure your API key (Anthropic recommended for default model)
+export ANTHROPIC_API_KEY="your-key-here"
+
+# Run a scan
+python -m strix_pydantic --target http://example.com --scan-mode quick
+
+# Or use the installed CLI command
+strix-pydantic --target http://example.com --scan-mode standard --verbose
 ```
 
-> [!NOTE]
-> First run automatically pulls the sandbox Docker image. Results are saved to `strix_runs/<run-name>`
+**What to expect:**
+- Logs are written to the current directory: `./strix_<run_id>.log`
+- Scan modes: `quick` (fast), `standard` (balanced), `deep` (thorough)
+- Docker sandbox is created automatically and cleaned up after the scan
+
+### Common Options
+
+```bash
+# Override model selection
+strix-pydantic --target http://example.com --model gpt-4o
+
+# Use mock tools for testing (no Docker required)
+strix-pydantic --target http://example.com --mock-tools --verbose
+
+# Interactive phase gates between agent roles
+strix-pydantic --target http://example.com --confirm
+
+# Custom agent instruction
+strix-pydantic --target http://example.com --instruction "Focus on API authentication"
+```
+
+See `python -m strix_pydantic --help` for all available options.
 
 ---
 
-## ☁️ Strix Platform
+## 🛡️ Supported LLM Providers & Model Selection
 
-Try the Strix full-stack security platform at **[app.strix.ai](https://app.strix.ai)** — sign up for free, connect your repos and domains, and launch a pentest in minutes.
+Strix Pydantic uses automatic model selection based on available API keys, with a clear fallback priority:
 
-- **Validated findings with PoCs** and reproduction steps
-- **One-click autofix** as ready-to-merge pull requests
-- **Continuous monitoring** across code, cloud, and infrastructure
-- **Integrations** with GitHub, Slack, Jira, Linear, and CI/CD pipelines
-- **Continuous learning** that builds on past findings and remediations
+### Provider Priority & Default Models
 
-[**Start your first pentest →**](https://app.strix.ai)
+| Provider | API Key | Default Model | Command Override |
+|---|---|---|---|
+| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` | `--model claude-3-5-sonnet` |
+| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o-mini` | `--model gpt-4o` |
+| **Google** | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `gemini-3.5-flash` | `--model gemini-2.0-flash` |
+
+### Model Selection Logic
+
+1. **Environment Override**: If `STRIX_LLM` is set, use that exact model string
+2. **Key Detection**: Check for API keys in order: Anthropic → OpenAI → Google
+3. **Default**: Return the appropriate model for the first available key
+4. **Error**: If no API keys are found, the scan will fail with a clear error message
+
+### Specifying Models
+
+The `--model` flag accepts model names with or without provider prefixes:
+
+```bash
+# With provider prefix (explicit)
+strix-pydantic --target http://example.com --model "anthropic:claude-3-5-sonnet"
+
+# Without prefix (auto-detected from model name pattern)
+strix-pydantic --target http://example.com --model "claude-3-5-sonnet"
+strix-pydantic --target http://example.com --model "gpt-4o"
+strix-pydantic --target http://example.com --model "gemini-2.0-flash"
+```
+
+Model name patterns are recognized:
+- **Claude models**: Start with `claude-` or contain "claude" → mapped to Anthropic
+- **Gemini models**: Contain "gemini" or "flash" → mapped to Google
+- **GPT models**: Contain `gpt-`, `gpt4`, `o1-`, `o3-` → mapped to OpenAI
 
 ---
 
-## ✨ Features
+## 🏗️ Architecture & Implementation Details
 
-### Agentic Security Tools
+### Pydantic Implementation (Primary Development)
+- **Technology Stack**: Pydantic AI v1.102.0 + Pydantic Graph v1.0+ (stable APIs)
+- **Core Orchestrator**: Unified `StepContext`-based graph with 3 agent roles
+- **State Management**: Immutable `StrixRunState` flowing through graph steps
+- **Tool Integration**: Docker sandbox client with context-aware tool filtering (in progress)
+- **Skills System**: Markdown-based capability loading from `strix/skills/`
 
-Strix agents come equipped with a comprehensive security testing toolkit:
+**Key Files**:
+- `strix-pydantic/strix_pydantic/interface/cli.py` — CLI entry point with all scan options
+- `strix-pydantic/strix_pydantic/agents/pydantic_orchestrator.py` — Graph orchestration logic
+- `strix-pydantic/strix_pydantic/config/model_config.py` — Provider detection and model resolution
 
-- **Full HTTP Proxy** - Full request/response manipulation and analysis
-- **Browser Automation** - Multi-tab browser for testing of XSS, CSRF, auth flows
-- **Terminal Environments** - Interactive shells for command execution and testing
-- **Python Runtime** - Custom exploit development and validation
-- **Reconnaissance** - Automated OSINT and attack surface mapping
-- **Code Analysis** - Static and dynamic analysis capabilities
-- **Knowledge Management** - Structured findings and attack documentation
+**Implementation Status**: See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for detailed progress on core framework, tool integration, and remaining work.
 
-### Comprehensive Vulnerability Detection
+### Go Port
+- **Location**: `strix-go/`
+- **Status**: Maintenance phase; LLM integration under evaluation
+- **Purpose**: High-concurrency binary distribution and performance testing
 
-Strix can identify and validate a wide range of security vulnerabilities:
+### Legacy Python
+- **Location**: `strix/`
+- **Purpose**: Original prototype; skills library is actively used by Pydantic implementation
+- **Status**: Reference and skill source only
 
-- **Access Control** - IDOR, privilege escalation, auth bypass
-- **Injection Attacks** - SQL, NoSQL, command injection
-- **Server-Side** - SSRF, XXE, deserialization flaws
-- **Client-Side** - XSS, prototype pollution, DOM vulnerabilities
-- **Business Logic** - Race conditions, workflow manipulation
-- **Authentication** - JWT vulnerabilities, session management
-- **Infrastructure** - Misconfigurations, exposed services
-
-### Graph of Agents
-
-Advanced multi-agent orchestration for comprehensive security testing:
-
-- **Distributed Workflows** - Specialized agents for different attacks and assets
-- **Scalable Testing** - Parallel execution for fast comprehensive coverage
-- **Dynamic Coordination** - Agents collaborate and share discoveries
+For detailed architecture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
-## Usage Examples
+## 🤝 Contributing
 
-### Basic Usage
+We welcome contributions! The project is actively being developed with a focus on the Pydantic implementation.
 
-```bash
-# Scan a local codebase
-strix --target ./app-directory
-
-# Security review of a GitHub repository
-strix --target https://github.com/org/repo
-
-# Black-box web application assessment
-strix --target https://your-app.com
-```
-
-### Advanced Testing Scenarios
+### Getting Started with Development
 
 ```bash
-# Grey-box authenticated testing
-strix --target https://your-app.com --instruction "Perform authenticated testing using credentials: user:pass"
+# Install dev dependencies
+cd strix-pydantic
+uv sync  # Installs all dependencies including dev tools
 
-# Multi-target testing (source code + deployed app)
-strix -t https://github.com/org/app -t https://your-app.com
+# Run tests
+uv run pytest -v
 
-# White-box source-aware scan (local repository)
-strix --target ./app-directory --scan-mode standard
-
-# Focused testing with custom instructions
-strix --target api.your-app.com --instruction "Focus on business logic flaws and IDOR vulnerabilities"
-
-# Provide detailed instructions through file (e.g., rules of engagement, scope, exclusions)
-strix --target api.your-app.com --instruction-file ./instruction.md
-
-# Force PR diff-scope against a specific base branch
-strix -n --target ./ --scan-mode quick --scope-mode diff --diff-base origin/main
+# Format and lint
+uv run ruff format .
+uv run ruff check . --fix
 ```
 
-### Headless Mode
+### Areas for Contribution
 
-Run Strix programmatically without interactive UI using the `-n/--non-interactive` flag—perfect for servers and automated jobs. The CLI prints real-time vulnerability findings, and the final report before exiting. Exits with non-zero code when vulnerabilities are found.
+- **Tool Integration** (High Priority): Wire sandbox client tool dispatch and implement tool result parsing
+- **Testing**: Add unit and integration tests for orchestrator and tool execution
+- **Documentation**: Expand skill library documentation and architecture details
+- **Go Port Stabilization**: LLM integration improvements and tool binding
 
-```bash
-strix -n --target https://your-app.com
-```
+See `CONTRIBUTING.md` for detailed workflow guidelines and `IMPLEMENTATION_STATUS.md` for current priorities.
 
-### CI/CD (GitHub Actions)
-
-Strix can be added to your pipeline to run a security test on pull requests with a lightweight GitHub Actions workflow:
-
-```yaml
-name: strix-penetration-test
-
-on:
-  pull_request:
-
-jobs:
-  security-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
-
-      - name: Run Strix
-        env:
-          STRIX_LLM: ${{ secrets.STRIX_LLM }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-
-        run: strix -n -t ./ --scan-mode quick
-```
-
-> [!TIP]
-> In CI pull request runs, Strix automatically scopes quick reviews to changed files.
-> If diff-scope cannot resolve, ensure checkout uses full history (`fetch-depth: 0`) or pass
-> `--diff-base` explicitly.
-
-### Configuration
-
-```bash
-export STRIX_LLM="openai/gpt-5.4"
-export LLM_API_KEY="your-api-key"
-
-# Optional
-export LLM_API_BASE="your-api-base-url"  # if using a local model, e.g. Ollama, LMStudio
-export PERPLEXITY_API_KEY="your-api-key"  # for search capabilities
-export STRIX_REASONING_EFFORT="high"  # control thinking effort (default: high, quick scan: medium)
-```
-
-> [!NOTE]
-> Strix automatically saves your configuration to `~/.strix/cli-config.json`, so you don't have to re-enter it on every run.
-
-**Recommended models for best results:**
-
-- [OpenAI GPT-5.4](https://openai.com/api/) — `openai/gpt-5.4`
-- [Anthropic Claude Sonnet 4.6](https://claude.com/platform/api) — `anthropic/claude-sonnet-4-6`
-- [Google Gemini 3 Pro Preview](https://cloud.google.com/vertex-ai) — `vertex_ai/gemini-3-pro-preview`
-
-See the [LLM Providers documentation](https://docs.strix.ai/llm-providers/overview) for all supported providers including Vertex AI, Bedrock, Azure, and local models.
-
-## Enterprise
-
-Get the same Strix experience with [enterprise-grade](https://strix.ai/demo) controls: SSO (SAML/OIDC), custom compliance reports, dedicated support & SLA, custom deployment options (VPC/self-hosted), BYOK model support, and tailored agents optimized for your environment. [Learn more](https://strix.ai/demo).
-
-## Documentation
-
-Full documentation is available at **[docs.strix.ai](https://docs.strix.ai)** — including detailed guides for usage, CI/CD integrations, skills, and advanced configuration.
-
-## Contributing
-
-We welcome contributions of code, docs, and new skills - check out our [Contributing Guide](https://docs.strix.ai/contributing) to get started or open a [pull request](https://github.com/usestrix/strix/pulls)/[issue](https://github.com/usestrix/strix/issues).
-
-## Join Our Community
-
-Have questions? Found a bug? Want to contribute? **[Join our Discord!](https://discord.gg/strix-ai)**
-
-## Support the Project
-
-**Love Strix?** Give us a ⭐ on GitHub!
-
-## Acknowledgements
-
-Strix builds on the incredible work of open-source projects like [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Textual](https://github.com/Textualize/textual). Huge thanks to their maintainers!
-
+---
 
 > [!WARNING]
-> Only test apps you own or have permission to test. You are responsible for using Strix ethically and legally.
-
-</div>
+> **Legal Notice**: Only test applications you own or have explicit permission to test. Unauthorized security testing is illegal. Use Strix responsibly and ethically.

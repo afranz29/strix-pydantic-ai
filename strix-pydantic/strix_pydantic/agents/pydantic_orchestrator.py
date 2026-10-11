@@ -1,0 +1,504 @@
+"""Pydantic Graph orchestrator for non-interactive scans."""
+
+import json
+import logging
+import os
+import time
+from contextlib import nullcontext
+from typing import Any
+
+from pydantic_graph import End, GraphBuilder
+
+from .types import RunConfig, StrixDeps, StrixRunState
+
+logger = logging.getLogger(__name__)
+
+
+def _dump_for_log(value: Any) -> str:
+    """Return a stable string representation for debug logs."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, default=str, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
+def _log_message_sequence(role: str, messages: list[Any], label: str) -> None:
+    """Log full message sequence with all parts for LLM traceability."""
+    logger.debug(f"🧾 [LLM TRACE] role={role} {label}: {len(messages)} message(s)")
+
+    for msg_idx, msg in enumerate(messages, 1):
+        msg_type = type(msg).__name__
+        msg_kind = getattr(msg, "kind", None)
+        timestamp = getattr(msg, "timestamp", None)
+
+        logger.debug(
+            f"   [msg {msg_idx}] type={msg_type}, kind={msg_kind}, timestamp={timestamp}"
+        )
+
+        parts = getattr(msg, "parts", []) or []
+        if not parts:
+            logger.debug(f"      [no-parts] {_dump_for_log(msg)}")
+            continue
+
+        for part_idx, part in enumerate(parts, 1):
+            part_kind = getattr(part, "part_kind", None)
+
+            if part_kind == "tool-call":
+                tool_name = getattr(part, "tool_name", "unknown")
+                args = getattr(part, "args", None)
+                logger.debug(
+                    f"      [part {part_idx}] tool-call name={tool_name}, args={_dump_for_log(args)}"
+                )
+            elif part_kind == "tool-return":
+                tool_name = getattr(part, "tool_name", "unknown")
+                content = getattr(part, "content", None)
+                logger.debug(
+                    f"      [part {part_idx}] tool-return name={tool_name}, content={_dump_for_log(content)}"
+                )
+            elif part_kind in {"text", "thinking", "system-prompt", "user-prompt"}:
+                content = getattr(part, "content", None)
+                logger.debug(f"      [part {part_idx}] {part_kind}: {_dump_for_log(content)}")
+            else:
+                logger.debug(
+                    f"      [part {part_idx}] kind={part_kind}, raw={_dump_for_log(part)}"
+                )
+
+
+def _log_agent_result(role: str, result: Any) -> None:
+    """Log token usage and full LLM message sequence."""
+    usage = result.usage
+    logger.debug(
+        f"   Tokens — input: {usage.input_tokens or 0}, "
+        f"output: {usage.output_tokens or 0}, "
+        f"cache_read: {usage.cache_read_tokens or 0}, "
+        f"cache_write: {usage.cache_write_tokens or 0}"
+    )
+
+    _log_message_sequence(role, result.all_messages(), label="all_messages")
+
+
+def _extract_tool_calls(result: Any) -> list[dict[str, Any]]:
+    """Extract detailed tool calls and results from agent messages."""
+    tools_called = []
+    messages = result.all_messages()
+
+    for msg in messages:
+        parts = getattr(msg, "parts", []) or []
+        for part in parts:
+            part_kind = getattr(part, "part_kind", None)
+            if part_kind == "tool-call":
+                tool_name = getattr(part, "tool_name", "unknown")
+                args = getattr(part, "args", {})
+
+                # Extract command if it's a terminal_execute or similar
+                command = None
+                if isinstance(args, dict):
+                    command = args.get("command") or args.get("prompt") or str(args)
+
+                tools_called.append({
+                    "name": tool_name,
+                    "command": command,
+                })
+            elif part_kind == "tool-return":
+                tool_name = getattr(part, "tool_name", "unknown")
+                content = getattr(part, "content", None)
+
+                # Extract output summary from tool result
+                output = None
+                if isinstance(content, str):
+                    # Truncate long outputs to first line or 100 chars
+                    first_line = content.split("\n")[0][:100]
+                    output = first_line if first_line else content[:100]
+
+                # Find matching tool call and add result
+                for tool_info in tools_called:
+                    if tool_info.get("name") == tool_name and "output" not in tool_info:
+                        tool_info["output"] = output
+                        break
+
+    return tools_called
+
+
+def _extract_thinking(result: Any) -> str:
+    """Extract thinking/reasoning from agent result messages."""
+    messages = result.all_messages()
+
+    for msg in messages:
+        parts = getattr(msg, "parts", []) or []
+        for part in parts:
+            part_kind = getattr(part, "part_kind", None)
+            if part_kind == "thinking":
+                content = getattr(part, "content", "")
+                if content:
+                    return content
+
+    return ""
+
+
+def build_orchestrator_graph() -> Any:
+    """
+    Build the orchestration graph using GraphBuilder.
+
+    Single unified orchestrator step handles full workflow loop internally.
+
+    Returns:
+        Configured Graph ready for execution with graph.run(state=..., deps=...)
+    """
+    g = GraphBuilder(
+        state_type=StrixRunState,
+        deps_type=StrixDeps,
+        output_type=str,
+    )
+
+    @g.step
+    async def orchestrate(ctx) -> End[str]:
+        """
+        Execute full scan orchestration workflow.
+
+        Handles bootstrap, agent turns, tool dispatch, and finalization
+        in a single unified step.
+        """
+        state = ctx.state
+        deps = ctx.deps
+
+        # Initialize sandbox client for tool execution
+        if deps.sandbox_client:
+            await deps.sandbox_client.__aenter__()
+            logger.info(f"✅ [BOOTSTRAP] Initialized sandbox client")
+
+        try:
+            return await _run_orchestration(state, deps)
+        finally:
+            # Cleanup sandbox client
+            if deps.sandbox_client:
+                await deps.sandbox_client.__aexit__(None, None, None)
+                logger.info(f"✅ [CLEANUP] Closed sandbox client")
+
+    # Connect start node to orchestrator step
+    g.add(g.edge_from(g.start_node).to(orchestrate))
+
+    # Build and return graph
+    return g.build(validate_graph_structure=False)
+
+
+async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> End[str]:
+    """Run the main orchestration workflow with proper error handling."""
+    start_time = time.time()
+
+    # ========== BOOTSTRAP ==========
+    logger.info(f"🚀 [BOOTSTRAP] Run {state.run_id} starting")
+    logger.info(f"   Target: {state.target}")
+    logger.info(f"   Scan Mode: {state.scan_mode}")
+    logger.info(f"   Model: {deps.run_config.model_name}")
+
+    # Emit scan started event
+    if deps.event_emitter:
+        await deps.event_emitter("scan_started", {
+            "target": state.target,
+            "scan_mode": state.scan_mode,
+            "model": deps.run_config.model_name,
+        })
+
+    # Validate target
+    if not state.target:
+        state.error = "Target URL is required"
+        logger.error(f"❌ [ABORT] Target is empty")
+        if deps.event_emitter:
+            await deps.event_emitter("scan_failed", {
+                "error": "Target URL is required",
+                "duration_seconds": time.time() - start_time,
+            })
+        return End(f"Aborted: Target URL is required")
+
+    # Initialize message history for all agent roles
+    for role in deps.agents.keys():
+        if role not in state.message_history:
+            state.message_history[role] = []
+        state.agent_statuses[role] = "initialized"
+
+    logger.info(f"✅ [BOOTSTRAP] Initialized {len(deps.agents)} agent roles")
+
+    # ========== AGENT LOOP ==========
+    roles = list(deps.agents.keys())
+    if not roles:
+        state.error = "No agents configured"
+        logger.error("❌ [ABORT] No agents")
+        return End("Aborted: No agents configured")
+
+    prior_outputs: dict[str, str] = {}
+
+    for role in roles:
+        state.iteration += 1
+        agent = deps.agents[role]
+        logger.info(f"🤖 [AGENT] {role} (iteration {state.iteration})")
+        state.agent_statuses[role] = "running"
+
+        # Emit goal in progress
+        if deps.event_emitter:
+            await deps.event_emitter("goal_updated", {
+                "goal_id": role,
+                "status": "in_progress",
+            })
+
+        # Track vulnerabilities count before this agent runs
+        vuln_count_before = len(state.vulnerabilities)
+
+        # Emit agent started event
+        if deps.event_emitter:
+            await deps.event_emitter("agent_started", {
+                "role": role,
+                "iteration": state.iteration,
+            })
+
+        # Update UI if callbacks are available
+        if deps.ui_update_agent_status:
+            deps.ui_update_agent_status(role, "running", state.iteration)
+
+        # Build prompt — inject prior role outputs as context
+        base = f"Target: {state.target}. " + (
+            state.instruction if state.instruction else f"Scan mode: {state.scan_mode}."
+        )
+        if prior_outputs:
+            findings_block = "\n\n".join(
+                f"=== {r} findings ===\n{out}" for r, out in prior_outputs.items()
+            )
+            prompt = f"{base}\n\nPrevious agent findings:\n{findings_block}"
+        else:
+            prompt = base
+
+        history = state.message_history.get(role, [])
+        logger.debug(f"📝 [LLM INPUT] role={role} user_prompt={prompt}")
+        _log_message_sequence(role, history, label="message_history_before_run")
+
+        from pydantic_ai.usage import UsageLimits
+
+        # Determine request limit based on scan mode to avoid premature usage limit exhaustion
+        request_limits = {
+            "quick": 1000,
+            "standard": 5000,
+            "deep": 10000,
+        }
+        req_limit = request_limits.get(state.scan_mode, 500)
+        usage_limits = UsageLimits(request_limit=req_limit)
+
+        _span_ctx = nullcontext()
+        if os.getenv("LOGFIRE_TOKEN"):
+            import logfire
+            _span_ctx = logfire.span(
+                "agent_phase",
+                role=role,
+                scan_id=state.run_id,
+                scan_mode=state.scan_mode,
+            )
+
+        try:
+            with _span_ctx:
+                result = await agent.run(
+                    user_prompt=prompt,
+                    message_history=history,
+                    deps=deps,
+                    usage_limits=usage_limits,
+                )
+        except Exception as e:
+            state.agent_statuses[role] = "failed"
+            logger.error(f"❌ [AGENT] {role} error: {e}", exc_info=True)
+            state.error = f"Agent execution error: {e}"
+            if deps.event_emitter:
+                await deps.event_emitter("goal_updated", {
+                    "goal_id": role,
+                    "status": "failed",
+                })
+            return End(f"Aborted: {state.error}")
+
+        _log_agent_result(role, result)
+
+        output = result.output
+        summary = output.summary if hasattr(output, "summary") else str(output)
+
+        state.message_history[role] = result.all_messages()
+        state.agent_responses[role] = summary
+        state.agent_statuses[role] = "completed"
+        prior_outputs[role] = summary
+
+        # Emit goal completed
+        if deps.event_emitter:
+            await deps.event_emitter("goal_updated", {
+                "goal_id": role,
+                "status": "completed",
+            })
+
+        # Emit token usage
+        if deps.event_emitter:
+            usage = result.usage
+            await deps.event_emitter("agent_token_usage", {
+                "role": role,
+                "iteration": state.iteration,
+                "input_tokens": usage.input_tokens or 0,
+                "output_tokens": usage.output_tokens or 0,
+                "cache_read_tokens": usage.cache_read_tokens or 0,
+                "cache_write_tokens": usage.cache_write_tokens or 0,
+            })
+
+        # Calculate cost
+        if deps.event_emitter and result.usage:
+            usage = result.usage
+            in_tokens = usage.input_tokens or 0
+            out_tokens = usage.output_tokens or 0
+            cache_read = usage.cache_read_tokens or 0
+            cache_write = usage.cache_write_tokens or 0
+
+            # Simple rate card per 1,000,000 tokens
+            model = deps.run_config.model_name.lower()
+            if "claude-3-5-sonnet" in model:
+                in_rate, out_rate = 3.00, 15.00
+            elif "claude-3-5-haiku" in model or "claude-haiku-4-5" in model:
+                in_rate, out_rate = 0.25, 1.25
+            elif "gemini-2.0-flash" in model or "gemini-3.5-flash" in model:
+                in_rate, out_rate = 0.075, 0.30
+            elif "gpt-4o-mini" in model:
+                in_rate, out_rate = 0.15, 0.60
+            elif "gpt-4o" in model:
+                in_rate, out_rate = 2.50, 10.00
+            else:
+                in_rate, out_rate = 0.15, 0.60  # default rate
+
+            cost_increment = (
+                (in_tokens - cache_read) * in_rate +
+                cache_read * in_rate * 0.1 +
+                out_tokens * out_rate
+            ) / 1_000_000.0
+
+            state.total_cost += cost_increment
+
+            await deps.event_emitter("cost_updated", {
+                "cost_increment": cost_increment,
+                "cumulative_cost": state.total_cost,
+                "model_name": deps.run_config.model_name,
+            })
+
+        # Emit thinking if available
+        if deps.event_emitter:
+            thinking = _extract_thinking(result)
+            if thinking:
+                await deps.event_emitter("agent_thinking", {
+                    "role": role,
+                    "iteration": state.iteration,
+                    "thinking": thinking,
+                })
+
+        # Emit agent message with reasoning
+        if deps.event_emitter:
+            await deps.event_emitter("agent_message", {
+                "role": role,
+                "iteration": state.iteration,
+                "message": summary,
+            })
+
+        # Emit tool execution events
+        if deps.event_emitter:
+            tools_called = _extract_tool_calls(result)
+            for tool_info in tools_called:
+                event_payload = {
+                    "role": role,
+                    "tool_name": tool_info["name"],
+                    "status": "completed",
+                }
+                if tool_info.get("command"):
+                    event_payload["command"] = tool_info["command"]
+                if tool_info.get("output"):
+                    event_payload["output"] = tool_info["output"]
+
+                await deps.event_emitter("tool_executed", event_payload)
+
+        if hasattr(output, "vulnerabilities"):
+            for v in output.vulnerabilities:
+                vuln_dict = v.model_dump()
+                state.vulnerabilities.append(vuln_dict)
+
+                # Emit vulnerability found event
+                if deps.event_emitter:
+                    await deps.event_emitter("vulnerability_found", {
+                        "role": role,
+                        "title": v.title,
+                        "severity": v.severity,
+                        "description": v.description,
+                        "cve_id": v.cve_id,
+                        "parameter": v.parameter,
+                        "poc": v.poc,
+                    })
+
+                # Update UI with vulnerability
+                if deps.ui_show_vulnerability:
+                    deps.ui_show_vulnerability(
+                        v.title,
+                        v.severity,
+                        v.description,
+                    )
+
+            logger.info(f"   Extracted {len(output.vulnerabilities)} vulnerabilities")
+
+        if hasattr(output, "notes"):
+            for n in output.notes:
+                state.notes.append({"content": n, "role": role})
+
+        logger.info(f"✅ [AGENT] {role} completed ({len(summary)} chars)")
+
+        # Calculate vulnerabilities found in this phase only
+        vuln_count_after = len(state.vulnerabilities)
+        vuln_found_this_phase = vuln_count_after - vuln_count_before
+
+        # Emit agent completed event
+        if deps.event_emitter:
+            await deps.event_emitter("agent_completed", {
+                "role": role,
+                "iteration": state.iteration,
+                "vulnerabilities_found": vuln_found_this_phase,
+            })
+
+        # Update UI with agent completion
+        if deps.ui_update_agent_status:
+            deps.ui_update_agent_status(role, "completed", state.iteration)
+
+        # Between-phase confirmation gate
+        next_role_index = roles.index(role) + 1
+        if deps.confirm_proceed is not None and next_role_index < len(roles):
+            next_role = roles[next_role_index]
+            vuln_count = len(state.vulnerabilities)
+            snippet = summary[:300].rstrip()
+            if not deps.confirm_proceed(role, next_role, snippet, vuln_count):
+                logger.info(f"⏹  [CONFIRM] User stopped scan after {role}")
+                break
+
+    # ========== FINALIZE ==========
+    logger.info(f"📊 [FINALIZE] Generating summary")
+
+    # Build final summary
+    summary_lines = [
+        f"Run {state.run_id} completed",
+        f"Target: {state.target}",
+        f"Scan mode: {state.scan_mode}",
+        f"Iterations: {state.iteration}/{state.max_iterations}",
+    ]
+
+    if state.vulnerabilities:
+        summary_lines.append(f"Vulnerabilities found: {len(state.vulnerabilities)}")
+
+    if state.notes:
+        summary_lines.append(f"Notes: {len(state.notes)}")
+
+    state.final_summary = "\n".join(summary_lines)
+
+    logger.info(f"✅ [FINALIZE] Run complete")
+
+    # Emit scan completed event
+    duration = time.time() - start_time
+    if deps.event_emitter:
+        await deps.event_emitter("scan_completed", {
+            "duration_seconds": duration,
+            "vulnerabilities_count": len(state.vulnerabilities),
+            "iterations": state.iteration,
+        })
+
+    return End("\n".join(summary_lines))

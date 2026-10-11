@@ -373,9 +373,9 @@ class DockerRuntime(AbstractRuntime):
             if container_name is None:
                 return
 
-            subprocess.Popen(  # noqa: S603
-                ["docker", "rm", "-f", container_name],  # noqa: S607
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            try:
+                container = self.client.containers.get(container_name)
+                container.stop(timeout=5)
+                container.remove(force=True)
+            except (NotFound, DockerException):
+                pass

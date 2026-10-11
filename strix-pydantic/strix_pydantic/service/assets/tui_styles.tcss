@@ -1,0 +1,203 @@
+/* Textual TUI Styles for Strix Scan Dashboard */
+
+Screen {
+    layout: vertical;
+    background: $surface;
+    color: $text;
+}
+
+/* Top row - Horizontal container with 3 panels (50% height) */
+Horizontal {
+    height: 1fr;
+    width: 1fr;
+}
+
+/* Top panel containers (equal width, fill height) */
+#agents-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $primary;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+#activity-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $warning;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+#vulnerabilities-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $success;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+}
+
+/* Titles for all panels */
+#agents-title,
+#activity-title,
+#vulnerabilities-title,
+#events-title {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Panel widgets - no borders since container handles it */
+#agents-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    margin: 0;
+}
+
+#activity-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    margin: 0;
+}
+
+#vulnerabilities-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    overflow-y: auto;
+    margin: 0;
+}
+
+/* Bottom panel (Events) - full width, 50% height */
+#events-container {
+    width: 1fr;
+    height: 1fr;
+    border: solid $accent;
+    padding: 0;
+    background: transparent;
+    layout: vertical;
+    margin: 0;
+}
+
+#agent-activity-panel {
+    width: 1fr;
+    height: 1fr;
+    border: none;
+    padding: 1;
+    background: transparent;
+    color: $text;
+    overflow-y: auto;
+    margin: 0;
+}
+
+/* Vulnerability cards */
+.vulnerability-card {
+    margin: 0 0 1 0;
+    height: auto;
+}
+
+.severity-critical {
+    border: solid $error;
+    color: $error;
+}
+
+.severity-high {
+    border: solid $warning;
+    color: $warning;
+}
+
+.severity-medium {
+    border: solid $accent;
+    color: $accent;
+}
+
+.severity-low {
+    border: solid $primary;
+    color: $primary;
+}
+
+.severity-info {
+    border: solid $secondary;
+    color: $secondary;
+}
+
+/* Status indicators */
+.status-running {
+    color: $accent;
+}
+
+.status-completed {
+    color: $success;
+}
+
+.status-failed {
+    color: $error;
+}
+
+.status-initialized {
+    color: $text-disabled;
+}
+
+/* Modal styles */
+Modal {
+    background: $boost;
+    color: $text;
+}
+
+Button {
+    margin: 0 1;
+    color: $text;
+}
+
+Button:focus {
+    border: solid $accent;
+    color: $text;
+}
+
+/* Text styling */
+.title {
+    text-style: bold;
+    color: $text;
+}
+
+.dimmed {
+    color: $text-disabled;
+}
+
+/* Ensure panel text is readable */
+Panel {
+    color: $text;
+}
+
+Static {
+    color: $text;
+}
+
+#buttons-container {
+    height: 3;
+    align: center middle;
+    background: $boost;
+    border-top: solid $primary;
+}
+
+#buttons-container Button {
+    margin: 0 2;
+    width: 25;
+}

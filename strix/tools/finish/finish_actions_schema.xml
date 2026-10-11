@@ -51,13 +51,13 @@ Professional, customer-facing penetration test report rules (PDF-ready):
 </description>
     <parameters>
       <parameter name="executive_summary" type="string" required="true">
-        <description>High-level summary for non-technical stakeholders. Include: risk posture assessment, key findings in business context, potential business impact (data exposure, compliance, reputation), and an overarching remediation theme. Write in clear, accessible language for executive leadership.</description>
+        <description>High-level summary for non-technical stakeholders. Include: risk posture assessment, key findings in business context, potential business impact, and an overarching remediation theme. Write in clear, accessible language for executive leadership.</description>
       </parameter>
       <parameter name="methodology" type="string" required="true">
-        <description>Testing methodology and scope. Include: frameworks and standards followed (e.g., OWASP WSTG, PTES), engagement type and approach (black-box, gray-box), in-scope assets and target environment, categories of testing activities performed, and evidence validation standards applied.</description>
+        <description>Testing methodology and VERIFIED SCOPE. Include: frameworks followed, engagement type (black-box, gray-box), and CRITICALLY, a detailed disclosure of scan completeness (e.g., specific port ranges scanned, depth of crawling, tools used). Explicitly state any technical constraints or assets that were not fully assessed to ensure transparency.</description>
       </parameter>
       <parameter name="technical_analysis" type="string" required="true">
-        <description>Consolidated overview of confirmed findings and risk patterns. Include: severity model used, a high-level summary of each finding with its severity rating, and systemic root causes or recurring themes observed across findings. Reference individual vulnerability reports for reproduction details — do not duplicate full evidence here.</description>
+        <description>Consolidated overview of confirmed findings and risk patterns. Include: severity model used, a high-level summary of each finding with its severity rating, and systemic root causes. Reference individual vulnerability reports for reproduction details — do not duplicate full evidence here.</description>
       </parameter>
       <parameter name="recommendations" type="string" required="true">
         <description>Prioritized, actionable remediation guidance organized by urgency (Immediate, Short-term, Medium-term). Each recommendation should provide specific technical remediation steps. Conclude with retest and validation guidance.</description>
