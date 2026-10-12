@@ -224,6 +224,17 @@ def scan(
     if non_interactive:
         ui = False
 
+    # Validate skills up front so a bad --skills value or a missing scan-mode
+    # skill fails fast instead of silently running with a smaller skill library.
+    skill_list = [s.strip() for s in skills.split(",") if s.strip()] if skills else []
+    skill_factory_check = SkillCapabilityFactory()
+    try:
+        skill_factory_check.validate_required_scan_modes()
+        if skill_list:
+            skill_factory_check.validate_requested(skill_list)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+
     overall_exit_code = 0
 
     for idx, single_target in enumerate(target, 1):
@@ -258,9 +269,6 @@ def scan(
             click.echo(f"❌ Failed to resolve model config: {e}", err=True)
             tui_app.stop()
             sys.exit(1)
-
-        # Parse skills
-        skill_list = [s.strip() for s in skills.split(",") if s.strip()] if skills else []
 
         # Create run state
         run_id = f"run_{uuid.uuid4().hex[:12]}"

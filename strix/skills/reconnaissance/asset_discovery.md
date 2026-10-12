@@ -1,4 +1,4 @@
-﻿---
+---
 name: asset-discovery
 description: Passive asset and attack-surface discovery via certificate transparency, TLS SAN pivoting, passive DNS, and ASN/IP enumeration to find hosts beyond subdomain brute force
 ---

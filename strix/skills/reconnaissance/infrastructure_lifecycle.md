@@ -1,4 +1,4 @@
-﻿---
+---
 name: infrastructure-lifecycle
 description: Discovery and security analysis of abandoned or ownership-drifted infrastructure trusted by software, firmware, DNS, mail, update systems, packages, scripts, telemetry, and deployed agents
 ---
