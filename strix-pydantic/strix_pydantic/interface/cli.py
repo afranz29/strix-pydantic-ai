@@ -470,20 +470,10 @@ def _build_agents(
     skill_factory = SkillCapabilityFactory()
 
     for role in roles:
-        # Get skills for this role
-        role_skills = skill_list.copy() if skill_list else []
-
-        # Automatically append the selected scan mode methodology as a skill
-        # (parity with core strix/llm/llm.py)
-        scan_mode_skill = f"scan_modes/{run_config.scan_mode}"
-        if scan_mode_skill not in role_skills:
-            role_skills.append(scan_mode_skill)
-
-        # Build skill capability
+        # Build skill capabilities: scan mode eager, all others deferred for agent-driven discovery
         skill_build = skill_factory.build_for_role(
-            role_skills,
+            scan_mode=run_config.scan_mode,
             role=role,
-            context="parent",
         )
 
         # Build registry toolset — direct callables for mock mode, sandbox dispatch for real mode
@@ -544,9 +534,7 @@ def _build_agents(
                 parent_tools = tool_registry.get_tools_for_context("parent")
                 logger.info(f"Built direct toolset for {role} with {len(parent_tools)} mock tools")
 
-        # Build agent with skill-derived instructions and model spec
-        # Include both skill toolset and registry toolset if available
-        toolsets = [skill_build.toolset]
+        toolsets = []
         if registry_toolset:
             toolsets.append(registry_toolset)
 
@@ -572,7 +560,8 @@ def _build_agents(
         agent = Agent(
             model_spec,
             output_type=AgentOutput,
-            instructions=skill_build.instructions,
+            instructions=f"You are the {role} agent. Execute your assigned tasks for the target system.",
+            capabilities=skill_build.capabilities,
             toolsets=toolsets,
             model_settings=model_settings,
         )
