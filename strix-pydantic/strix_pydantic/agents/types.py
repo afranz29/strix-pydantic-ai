@@ -33,6 +33,8 @@ class RunConfig:
     connect_timeout: float = 5.0
     execute_timeout: float = 120.0
     orchestrator_step_timeout: float = 180.0
+    max_turns: int | None = None  # per-role request limit; overrides scan-mode default when set
+    enable_post_exploitation: bool = False  # post_exploitation phase is opt-in
 
 
 @dataclass

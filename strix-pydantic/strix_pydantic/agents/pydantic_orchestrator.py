@@ -196,6 +196,9 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
 
     # ========== AGENT LOOP ==========
     roles = list(deps.agents.keys())
+    if not deps.run_config.enable_post_exploitation:
+        roles = [r for r in roles if r != "post_exploitation"]
+        logger.info("⏭  [SKIP] post_exploitation disabled (pass --enable-post-exploitation to run it)")
     if not roles:
         state.error = "No agents configured"
         logger.error("❌ [ABORT] No agents")
@@ -246,15 +249,11 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
         logger.debug(f"📝 [LLM INPUT] role={role} user_prompt={prompt}")
         _log_message_sequence(role, history, label="message_history_before_run")
 
+        from pydantic_ai.exceptions import UsageLimitExceeded
         from pydantic_ai.usage import UsageLimits
 
-        # Determine request limit based on scan mode to avoid premature usage limit exhaustion
-        request_limits = {
-            "quick": 1000,
-            "standard": 5000,
-            "deep": 10000,
-        }
-        req_limit = request_limits.get(state.scan_mode, 500)
+        scan_mode_limits = {"quick": 1000, "standard": 5000, "deep": 10000}
+        req_limit = deps.run_config.max_turns or scan_mode_limits.get(state.scan_mode, 500)
         usage_limits = UsageLimits(request_limit=req_limit)
 
         _span_ctx = nullcontext()
@@ -262,19 +261,26 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
             import logfire
             _span_ctx = logfire.span(
                 "agent_phase",
+                _tags=[role, state.run_id],
                 role=role,
                 scan_id=state.run_id,
                 scan_mode=state.scan_mode,
             )
 
+        result = None
+        turn_limit_hit = False
         try:
             with _span_ctx:
-                result = await agent.run(
-                    user_prompt=prompt,
-                    message_history=history,
-                    deps=deps,
-                    usage_limits=usage_limits,
-                )
+                # Caught inside the span so a turn-limit stop isn't recorded as an exception span.
+                try:
+                    result = await agent.run(
+                        user_prompt=prompt,
+                        message_history=history,
+                        deps=deps,
+                        usage_limits=usage_limits,
+                    )
+                except UsageLimitExceeded:
+                    turn_limit_hit = True
         except Exception as e:
             state.agent_statuses[role] = "failed"
             logger.exception(f"❌ [AGENT] {role} error")
@@ -285,6 +291,17 @@ async def _run_orchestration(state: StrixRunState, deps: StrixDeps) -> str:
                     "status": "failed",
                 })
             return f"Aborted: {state.error}"
+
+        if turn_limit_hit:
+            logger.info(f"⏹  [AGENT] {role} reached turn limit ({req_limit}), finalizing")
+            state.agent_statuses[role] = "completed"
+            if deps.event_emitter:
+                await deps.event_emitter("goal_updated", {
+                    "goal_id": role,
+                    "status": "completed",
+                })
+            prior_outputs[role] = f"(turn limit reached after {req_limit} requests)"
+            continue
 
         _log_agent_result(role, result)
 

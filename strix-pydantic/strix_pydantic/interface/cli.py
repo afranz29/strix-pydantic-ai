@@ -136,6 +136,17 @@ def setup_logging(log_file: Path | None = None, verbose: bool = False) -> Path:
     help="Path to a file containing detailed custom instructions for the penetration test.",
 )
 @click.option(
+    "--max-turns",
+    type=int,
+    default=None,
+    help="Maximum model requests per agent role (overrides scan-mode default; useful for testing)",
+)
+@click.option(
+    "--enable-post-exploitation",
+    is_flag=True,
+    help="Run the post_exploitation phase after exploitation (default: disabled)",
+)
+@click.option(
     "--confirm",
     is_flag=True,
     help="Pause and ask for confirmation between agent phases",
@@ -182,6 +193,8 @@ def scan(
     mock_tools: bool,
     instruction: str,
     instruction_file: str | None,
+    max_turns: int | None,
+    enable_post_exploitation: bool,
     confirm: bool,
     ui: bool,
     non_interactive: bool,
@@ -265,6 +278,8 @@ def scan(
             scan_mode=scan_mode,
             non_interactive=True,
             execute_timeout=timeout,
+            max_turns=max_turns,
+            enable_post_exploitation=enable_post_exploitation,
         )
 
         runtime = None
