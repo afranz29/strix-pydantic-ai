@@ -159,6 +159,7 @@ Model name patterns are recognized:
 - **Location**: `strix/`
 - **Purpose**: Original prototype; skills library is actively used by Pydantic implementation
 - **Status**: Reference and skill source only
+- **Updating skill content**: `strix/skills/*.md` is vendored from upstream [`usestrix/strix`](https://github.com/usestrix/strix). Run `scripts/sync_skills.sh [ref]` to resync it against a given upstream ref (defaults to the pinned SHA in that script), review the diff, then run `uv run pytest` from `strix-pydantic/` before committing.
 
 For detailed architecture, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 

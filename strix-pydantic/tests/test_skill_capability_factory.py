@@ -142,3 +142,40 @@ def test_readme_not_treated_as_skill(skills_root):
     )
     factory = SkillCapabilityFactory(strix_content_dir=skills_root)
     assert "vulnerabilities/README" not in factory._enumerate_skills()
+
+
+def test_vendored_skill_content_has_not_regressed():
+    """
+    Drift sentinel for the vendored strix/skills/ tree (see scripts/sync_skills.sh).
+
+    Catches the class of regression from strix-pydantic-ai#10: content silently falling
+    behind upstream usestrix/strix, or an accidental deletion, without any visible error.
+    """
+    factory = SkillCapabilityFactory()
+    if factory.skills_dir is None or not factory.skills_dir.exists():
+        pytest.skip("strix/skills/ sibling content dir not present in this environment")
+
+    factory.validate_required_scan_modes()
+
+    skill_ids = set(factory._enumerate_skills())
+    assert "scan_modes/diff" in skill_ids
+
+    expected_categories = {
+        "analysis",
+        "cloud",
+        "coordination",
+        "custom",
+        "frameworks",
+        "protocols",
+        "reconnaissance",
+        "scan_modes",
+        "technologies",
+        "tooling",
+        "vulnerabilities",
+    }
+    present_categories = {skill_id.split("/", 1)[0] for skill_id in skill_ids}
+    missing = expected_categories - present_categories
+    assert not missing, f"Missing skill categories: {sorted(missing)}"
+
+    reconnaissance_skills = {s for s in skill_ids if s.startswith("reconnaissance/")}
+    assert reconnaissance_skills, "reconnaissance/ must not be empty; it backs an agent role"
